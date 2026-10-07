@@ -100,6 +100,24 @@ def is_logged_in(page: Any,
     return any(t.casefold() in body for t in texts)
 
 
+def _safe_check(check: Callable[[Any], bool], page: Any) -> bool:
+    try:
+        return bool(check(page))
+    except Exception:
+        return False
+
+
+def describe_login_signs(selectors: Iterable[str] = DEFAULT_LOGIN_SELECTORS,
+                         texts: Iterable[str] = DEFAULT_LOGIN_TEXTS) -> str:
+    """Mô tả các dấu hiệu mặc định dùng để dò đăng nhập (cho thông báo lỗi)."""
+    parts = []
+    if selectors:
+        parts.append("phần tử " + ", ".join(selectors))
+    if texts:
+        parts.append("chữ " + ", ".join(f"'{t}'" for t in texts))
+    return " hoặc ".join(parts) or "(không có)"
+
+
 def wait_for_login(page: Any,
                    timeout: float = DEFAULT_LOGIN_TIMEOUT,
                    poll: float = DEFAULT_POLL_INTERVAL,
@@ -107,10 +125,24 @@ def wait_for_login(page: Any,
                    texts: Iterable[str] = DEFAULT_LOGIN_TEXTS,
                    sleep: Callable[[float], None] = time.sleep,
                    clock: Callable[[], float] = time.monotonic,
-                   notify: Callable[[str], None] | None = print) -> None:
-    """Chờ tới khi trang có dấu hiệu đã đăng nhập, quá `timeout` thì báo lỗi."""
+                   notify: Callable[[str], None] | None = print,
+                   login_check: Callable[[Any], bool] | None = None,
+                   login_signs: str | None = None) -> None:
+    """Chờ tới khi trang có dấu hiệu đã đăng nhập, quá `timeout` thì báo lỗi.
+
+    `login_check(page) -> bool` (của adapter shop) thay cho cách dò chung
+    bằng `selectors`/`texts`; `login_signs` mô tả nó trong thông báo lỗi.
+    """
     selectors, texts = tuple(selectors), tuple(texts)
-    if is_logged_in(page, selectors, texts):
+    if login_check is not None:
+        def check() -> bool:
+            return _safe_check(login_check, page)
+        signs = login_signs or getattr(login_check, "__name__", "login_check")
+    else:
+        def check() -> bool:
+            return is_logged_in(page, selectors, texts)
+        signs = login_signs or describe_login_signs(selectors, texts)
+    if check():
         return
     if notify:
         notify("Chưa đăng nhập. Hãy đăng nhập trong cửa sổ trình duyệt vừa mở; "
@@ -118,11 +150,28 @@ def wait_for_login(page: Any,
     deadline = clock() + timeout
     while clock() < deadline:
         sleep(poll)
-        if is_logged_in(page, selectors, texts):
+        if check():
             if notify:
                 notify("Đã đăng nhập, tiếp tục.")
             return
-    raise LoginTimeout(f"Quá {timeout:.0f} giây mà vẫn chưa đăng nhập.")
+    raise LoginTimeout(f"Quá {timeout:.0f} giây mà vẫn chưa đăng nhập "
+                       f"(đã dò: {signs}).")
+
+
+def login_options_for(shop_url: str) -> dict[str, Any]:
+    """`login_check`/`login_signs` của adapter shop (nếu có) cho `open_shop`.
+
+    Shop không có adapter hoặc adapter không có `login_check` -> {} (dùng cách
+    dò chung).
+    """
+    from .shops import filler_class_for
+
+    cls = filler_class_for(shop_url or "")
+    check = getattr(cls, "login_check", None) if cls else None
+    if not callable(check):
+        return {}
+    return {"login_check": check,
+            "login_signs": getattr(cls, "login_signs", None)}
 
 
 # ------------------------------------------------------------ phiên
@@ -206,13 +255,20 @@ class BrowserSession:
                   poll: float = DEFAULT_POLL_INTERVAL,
                   selectors: Iterable[str] = DEFAULT_LOGIN_SELECTORS,
                   texts: Iterable[str] = DEFAULT_LOGIN_TEXTS,
+                  login_check: Callable[[Any], bool] | None = None,
+                  login_signs: str | None = None,
                   **wait_kwargs: Any) -> Any:
-        """Mở `url`; nếu chưa đăng nhập thì chờ người dùng đăng nhập xong."""
+        """Mở `url`; nếu chưa đăng nhập thì chờ người dùng đăng nhập xong.
+
+        `login_check(page) -> bool`: cách dò đăng nhập riêng của shop (nếu có).
+        """
         page = self.new_page()
         page.goto(url, wait_until="domcontentloaded")
         if wait_login:
             wait_for_login(page, timeout=timeout, poll=poll,
-                           selectors=selectors, texts=texts, **wait_kwargs)
+                           selectors=selectors, texts=texts,
+                           login_check=login_check, login_signs=login_signs,
+                           **wait_kwargs)
         return page
 
 

@@ -269,6 +269,7 @@ def format_queries(lines: list) -> str:
 def cmd_cart(args: argparse.Namespace) -> int:
     """Mở shop bằng phiên đã đăng nhập, bỏ BOM vào giỏ. KHÔNG thanh toán."""
     from .browser import BrowserSession, BrowserUnavailable, LoginTimeout
+    from .browser.session import login_options_for
 
     lines = bom_mod.load(args.bom)
     if not lines:
@@ -291,7 +292,8 @@ def cmd_cart(args: argparse.Namespace) -> int:
     try:
         with BrowserSession(profile_dir=args.profile) as session:
             page = session.open_shop(args.shop if "://" in args.shop else base,
-                                     timeout=args.login_timeout)
+                                     timeout=args.login_timeout,
+                                     **login_options_for(base))
             print()
             results = run_cart(page, lines, base, dry_run=args.dry_run,
                                platform=platform,

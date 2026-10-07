@@ -233,6 +233,7 @@ def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
     KHÔNG thanh toán — CartFiller từ chối mọi nút kiểu "thanh toán".
     """
     from ..browser import BrowserSession
+    from ..browser.session import login_options_for
     from ..browser.cart import DEFAULT_DELAY, CartFiller, shop_option
 
     base = shop_base_url(shop_url)
@@ -241,7 +242,8 @@ def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
                      if s.url and _host(s.url) == host), "")
     job.log("Đang mở trình duyệt…")
     with BrowserSession() as session:
-        page = session.open_shop(shop_url, notify=job.log)
+        page = session.open_shop(shop_url, notify=job.log,
+                                 **login_options_for(base))
         job.log("Đã vào shop, bắt đầu tìm từng linh kiện.")
         filler = CartFiller(page, base, platform=platform,
                             no_image_out_of_stock=shop_option(

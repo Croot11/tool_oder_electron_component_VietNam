@@ -18,14 +18,18 @@ Trang của CXT không theo khuôn Haravan/Woo nên bộ đọc chung đoán sai
 * Sản phẩm gom nhiều giá trị ("thông số từ 1K đến 99K") hoặc nhiều sản phẩm
   trùng tên (HK4100F nhiều điện áp): vào trang sản phẩm, chọn biến thể
   ``kthuoc``/``color`` nếu có; không chắc thì ``uncertain``.
-* Đăng nhập: nút "CHO VÀO GIỎ" trỏ tới ``dang-nhap.html`` nghĩa là chưa đăng
-  nhập.
+* Đăng nhập (`is_logged_in`): có cookie ``mem_logged``/``mem_token`` trên
+  ``.cxtvn.com`` VÀ nút "CHO VÀO GIỎ"/"ĐẶT HÀNG" không trỏ tới
+  ``dang-nhap.html``. Nút trỏ tới ``dang-nhap.html`` nghĩa là chưa đăng nhập.
 * Thêm giỏ: đọc bảng giá bậc (``.pricelist_head``) và ``#min_buy``, điền
-  ``#sl``, bấm ``.addCart`` "CHO VÀO GIỎ"; xác nhận khi ``.slcart`` tăng hoặc
-  nút đổi sang "ĐÃ THÊM".
+  ``#sl``, bấm thẻ ``a`` "CHO VÀO GIỎ" trong ``.sale-button`` (khi đã đăng
+  nhập: ``href="javascript:;" onclick="addToCart(id, $('#sl').val())"``, không
+  có class ``addCart``); xác nhận khi ``.slcart`` tăng hoặc nút đổi sang
+  "ĐÃ THÊM".
 
-AN TOÀN: tuyệt đối không bấm "ĐẶT HÀNG"/"MUA NGAY", không bấm nút nào gọi
-``addToCart`` với tham số ``checkout``.
+AN TOÀN: tuyệt đối không bấm "ĐẶT HÀNG"/"MUA NGAY" (``.btn-buy``), không bấm
+nút nào gọi ``addToCart`` với tham số ``checkout`` hay tham số thứ 5 là
+``true`` (mua ngay).
 """
 
 from __future__ import annotations
@@ -56,6 +60,9 @@ VARIANT_FIELDS = ("kthuoc", "color")
 MAX_OOS_RETRY = 3                     # số lần chọn lại khi trang SP báo hết hàng
 
 LOGIN_SELECTORS = ("a[href*='dang-xuat']", "a[href*='logout']")
+LOGIN_COOKIES = ("mem_logged", "mem_token")
+LOGIN_SIGNS = ("cookie mem_logged/mem_token trên .cxtvn.com và nút "
+               "CHO VÀO GIỎ/ĐẶT HÀNG không trỏ tới dang-nhap.html")
 
 
 def is_cxt_url(url: str) -> bool:
@@ -561,8 +568,107 @@ def _variant_options(root: Node) -> tuple[dict[str, list[tuple[str, str]]],
     return variants, kinds
 
 
+def _in_sale_button(n: Node) -> bool:
+    return any(_has_class(a, "sale-button") for a in n.ancestors())
+
+
 def _cart_buttons(root: Node) -> list[Node]:
-    return [n for n in root.iter() if _has_class(n, "addcart")]
+    """Nút giỏ/đặt hàng: .addCart, thẻ a trong .sale-button, onclick addToCart."""
+    return [n for n in root.iter()
+            if _has_class(n, "addcart")
+            or (n.tag == "a" and (_in_sale_button(n)
+                                  or "addtocart" in n.get("onclick").lower()))]
+
+
+def has_login_redirect(html: str) -> bool:
+    """Nút CHO VÀO GIỎ/ĐẶT HÀNG trên trang có trỏ tới dang-nhap không."""
+    for b in _cart_buttons(parse_html(html or "")):
+        t = b.text() or b.get("value")
+        if not (_is_add_label(t) or "dat hang" in _fold(t)):
+            continue
+        if "dang-nhap" in b.get("href").lower() or \
+                "dang-nhap" in b.get("onclick").lower():
+            return True
+    return False
+
+
+def _has_login_cookie(page: Any) -> bool:
+    ctx = getattr(page, "context", None)
+    if callable(ctx) and not hasattr(ctx, "cookies"):
+        ctx = ctx()                       # phòng khi context là phương thức
+    if ctx is None or not hasattr(ctx, "cookies"):
+        return False
+    try:
+        cookies = ctx.cookies() or []
+    except Exception:
+        return False
+    for c in cookies:
+        if not isinstance(c, dict):
+            continue
+        dom = (c.get("domain") or "").lstrip(".").lower()
+        if c.get("name") in LOGIN_COOKIES and (c.get("value") or "") and \
+                (dom == "cxtvn.com" or dom.endswith(".cxtvn.com")):
+            return True
+    return False
+
+
+def is_logged_in(page: Any) -> bool:
+    """Đã đăng nhập CXT: có cookie mem_logged/mem_token trên .cxtvn.com VÀ
+    nút CHO VÀO GIỎ/ĐẶT HÀNG trên trang không trỏ tới dang-nhap.
+
+    Lỗi khi dò (trang đang chuyển hướng...) được coi là "chưa".
+    """
+    if not _has_login_cookie(page):
+        return False
+    try:
+        html = page.content()
+    except Exception:
+        return False
+    return not has_login_redirect(html)
+
+
+_ADD_CALL_RE = re.compile(r"addtocart\s*\(", re.I)
+
+
+def _call_args(js: str) -> Optional[list[str]]:
+    """Các tham số cấp ngoài cùng của lời gọi addToCart(...) trong `js`."""
+    m = _ADD_CALL_RE.search(js or "")
+    if not m:
+        return None
+    args: list[str] = []
+    depth, cur, quote = 0, "", ""
+    for ch in js[m.end():]:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                args.append(cur.strip())
+                return [] if args == [""] else args
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    return None                           # thiếu ngoặc đóng: không tin
+
+
+def is_add_to_cart_onclick(onclick: str) -> bool:
+    """onclick gọi addToCart để CHO VÀO GIỎ — không phải MUA NGAY
+    (tham số thứ 5 là true) hay checkout."""
+    args = _call_args(onclick)
+    if args is None:
+        return False
+    if len(args) >= 5 and args[4].strip().lower() == "true":
+        return False
+    return not any("checkout" in a.lower() for a in args)
 
 
 def _is_add_label(text: str) -> bool:
@@ -746,6 +852,10 @@ def cxt_no_image_flag(shops: Any = None) -> bool:
 class CxtCartFiller(CartFiller):
     """CartFiller cho CXT. Được `CartFiller(...)` tự chọn khi link là *.cxtvn.com."""
 
+    # Cách dò đăng nhập riêng của CXT — CLI/web truyền vào `open_shop`.
+    login_check = staticmethod(is_logged_in)
+    login_signs = LOGIN_SIGNS
+
     def __init__(self, page: Any, base_url: str, **kwargs: Any) -> None:
         kwargs.pop("search_url", None)
         kwargs.pop("platform", None)
@@ -787,21 +897,45 @@ class CxtCartFiller(CartFiller):
                 pass
         return " ".join(out)
 
+    @staticmethod
+    def _attr(handle: Any, name: str) -> str:
+        try:
+            return handle.get_attribute(name) or ""
+        except Exception:
+            return ""
+
+    def _is_safe_add(self, handle: Any) -> bool:
+        """Đúng nút 'CHO VÀO GIỎ': chữ đúng, không phải MUA NGAY/ĐẶT HÀNG/checkout,
+        onclick (nếu có) gọi addToCart mà không có tham số thứ 5 = true."""
+        text, href = self._label(handle)
+        if not _is_add_label(text):
+            return False
+        if is_checkout_like(text, href) or _onclick_forbidden(self._attrs(handle)):
+            return False
+        if "btn-buy" in self._attr(handle, "class").lower().split():
+            return False
+        if "dang-nhap" in href.lower():
+            return False
+        onclick = self._attr(handle, "onclick")
+        if "addtocart" in onclick.lower() and not is_add_to_cart_onclick(onclick):
+            return False
+        return True
+
     def _add_button(self) -> Any:
-        """Nút .addCart 'CHO VÀO GIỎ' — bỏ qua mọi nút ĐẶT HÀNG/MUA NGAY/checkout."""
-        for h in self._all(".addCart"):
-            text, href = self._label(h)
-            if not _is_add_label(text):
-                continue
-            if is_checkout_like(text, href) or _onclick_forbidden(self._attrs(h)):
-                continue
-            return h
+        """Thẻ a 'CHO VÀO GIỎ' (trong .sale-button / onclick addToCart / .addCart).
+
+        Bỏ qua mọi nút ĐẶT HÀNG, MUA NGAY (.btn-buy, addToCart(..., true)) và
+        checkout.
+        """
+        for sel in (".sale-button a", "a[onclick*='addToCart']", ".addCart"):
+            for h in self._all(sel):
+                if self._is_safe_add(h):
+                    return h
         return None
 
     def _click_add(self, handle: Any) -> None:
-        text, href = self._label(handle)
-        if (not _is_add_label(text) or is_checkout_like(text, href)
-                or _onclick_forbidden(self._attrs(handle))):
+        if not self._is_safe_add(handle):
+            text, _ = self._label(handle)
             raise CheckoutRefused(f"Từ chối bấm nút không phải 'CHO VÀO GIỎ': {text!r}")
         handle.click()
 
@@ -1026,7 +1160,8 @@ class CxtCartFiller(CartFiller):
 __all__ = [
     "SEARCH_URL", "LOGIN_SELECTORS", "CxtCandidate", "CxtProduct",
     "CxtCartFiller", "choose_variant", "cxt_no_image_flag", "cxt_pick",
-    "cxt_score", "is_no_image", "oos_message",
+    "cxt_score", "has_login_redirect", "is_add_to_cart_onclick",
+    "is_logged_in", "is_no_image", "oos_message", "LOGIN_COOKIES", "LOGIN_SIGNS",
     "detect_cxt_pack", "is_cxt_url", "is_multi_value", "packages",
     "parse_cxt_product", "parse_cxt_search", "spec_values",
 ]
