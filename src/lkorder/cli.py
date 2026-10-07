@@ -3,6 +3,7 @@
     lk order  bom.txt          -> phương án đặt hàng tốt nhất
     lk compare bom.txt         -> gom về ít shop hơn thì đắt thêm bao nhiêu
     lk match  bom.txt          -> soi lại việc khớp tên, tìm chỗ khớp sai
+    lk cart   bom.txt --shop URL -> mở shop, bỏ BOM vào giỏ (không thanh toán)
     lk shops                   -> danh sách shop đang cấu hình
     lk init                    -> tạo file cấu hình + dữ liệu mẫu
 """
@@ -172,6 +173,134 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _shop_base(url: str) -> str:
+    """Chuẩn hoá link shop: thêm https:// nếu thiếu, trả về gốc scheme://host."""
+    from urllib.parse import urlsplit
+
+    url = url.strip()
+    if not url:
+        raise SystemExit("Thiếu link shop (--shop).")
+    if "://" not in url:
+        url = "https://" + url
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise SystemExit(f"Link shop không hợp lệ: {url}")
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _guess_platform(base_url: str, shops_path: str | None) -> str:
+    """Đoán nền tảng shop từ data/shops.json (khớp theo tên miền)."""
+    from urllib.parse import urlsplit
+
+    def host(u: str) -> str:
+        h = urlsplit(u if "://" in u else "https://" + u).netloc.lower()
+        return h[4:] if h.startswith("www.") else h
+
+    try:
+        shops = config.load_shops(shops_path)
+    except (FileNotFoundError, ValueError, KeyError):
+        return ""
+    want = host(base_url)
+    for s in shops.values():
+        if s.url and host(s.url) == want and s.platform != "csv":
+            return s.platform
+    return ""
+
+
+def run_cart(page, lines: list, base_url: str, *, dry_run: bool = False,
+             notify=print, **filler_kwargs) -> list:
+    """Chạy thêm giỏ (hoặc chỉ tìm + khớp khi dry_run) trên trang đã mở.
+
+    Tách khỏi `cmd_cart` để test được bằng trang giả, không cần Playwright.
+    """
+    from .browser import cart as cart_mod
+    from .browser.matcher import MATCH, NONE
+
+    filler = cart_mod.CartFiller(page, base_url, notify=notify, **filler_kwargs)
+    if not dry_run:
+        return filler.run(lines)
+
+    out = []
+    for i, line in enumerate(lines):
+        if i:
+            lo, hi = filler.delay
+            filler.sleep(filler.rand(lo, hi) if hi > lo else lo)
+        try:
+            dec, q = filler.find(line)
+            if dec.status == MATCH and dec.best is not None:
+                units = cart_mod.units_to_order(line.qty, dec.best.pack)
+                res = cart_mod.LineResult(
+                    line, report.CART_MATCHED, dec.best, units,
+                    units * max(1, dec.best.pack), [dec.best], q,
+                    f"khớp điểm {dec.best.score:.2f}")
+            else:
+                status = cart_mod.NOT_FOUND if dec.status == NONE \
+                    else cart_mod.UNCERTAIN
+                res = cart_mod.LineResult(line, status, dec.best,
+                                          candidates=dec.shortlist, query=q,
+                                          message=dec.message)
+        except Exception as e:      # một dòng hỏng không làm hỏng cả lượt
+            res = cart_mod.LineResult(line, cart_mod.ERROR,
+                                      message=f"{type(e).__name__}: {e}")
+        if notify:
+            name = line.raw or line.key
+            if res.status == report.CART_MATCHED:
+                notify(f"[khớp] {name}: '{res.product.title}'")
+            else:
+                notify(res.summary())
+        out.append(res)
+    return out
+
+
+def cmd_cart(args: argparse.Namespace) -> int:
+    """Mở shop bằng phiên đã đăng nhập, bỏ BOM vào giỏ. KHÔNG thanh toán."""
+    from .browser import BrowserSession, BrowserUnavailable, LoginTimeout
+
+    lines = bom_mod.load(args.bom)
+    if not lines:
+        raise SystemExit(f"BOM rỗng hoặc không đọc được: {args.bom}")
+    base = _shop_base(args.shop)
+    platform = args.platform or _guess_platform(base, args.shops)
+    if args.delay_min < 0 or args.delay_max < args.delay_min:
+        raise SystemExit("--delay-min/--delay-max không hợp lệ.")
+
+    mode = "dry-run: chỉ tìm và khớp" if args.dry_run else "thêm vào giỏ"
+    print(f"{len(lines)} dòng BOM → {base}"
+          + (f" ({platform})" if platform else "") + f"  [{mode}]")
+    print("Đang mở trình duyệt…")
+
+    try:
+        with BrowserSession(profile_dir=args.profile) as session:
+            page = session.open_shop(args.shop if "://" in args.shop else base,
+                                     timeout=args.login_timeout)
+            print()
+            results = run_cart(page, lines, base, dry_run=args.dry_run,
+                               platform=platform,
+                               delay=(args.delay_min, args.delay_max))
+            print()
+            print(report.render_cart(results, base, dry_run=args.dry_run))
+            if args.md:
+                Path(args.md).write_text(
+                    report.cart_to_markdown(results, base, dry_run=args.dry_run),
+                    encoding="utf-8")
+                print(f"\n→ Đã lưu Markdown: {args.md}")
+            if not args.dry_run and not args.no_wait and sys.stdin.isatty():
+                try:
+                    input("\nKiểm tra giỏ hàng trong cửa sổ trình duyệt rồi nhấn "
+                          "Enter để đóng…")
+                except EOFError:
+                    pass
+    except BrowserUnavailable as e:
+        print(f"Lỗi: {e}", file=sys.stderr)
+        return 2
+    except LoginTimeout as e:
+        print(f"Lỗi: {e}", file=sys.stderr)
+        return 2
+
+    n = report.cart_counts(results)
+    return 0 if n["added"] == len(results) else 1
+
+
 def cmd_shops(args: argparse.Namespace) -> int:
     shops = config.load_shops(args.shops)
     rows = [
@@ -269,6 +398,28 @@ def build_parser() -> argparse.ArgumentParser:
                     help="chỉ xem shop nào trả dữ liệu, không ghi file")
     sp.add_argument("--no-cache", action="store_true", help="bỏ qua cache")
     sp.set_defaults(func=cmd_fetch)
+
+    sp = sub.add_parser("cart", help="mở shop, bỏ BOM vào giỏ (không thanh toán)")
+    sp.add_argument("bom", help="file danh sách linh kiện cần mua")
+    sp.add_argument("--shop", required=True, help="link shop, vd https://hshop.vn")
+    sp.add_argument("--platform", default="",
+                    help="nền tảng shop (haravan, shopify, sapo, woo). "
+                         "Mặc định đoán từ shops.json")
+    sp.add_argument("-s", "--shops", help="file cấu hình shop (JSON)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="chỉ tìm và khớp, không bấm thêm vào giỏ")
+    sp.add_argument("--md", help="lưu báo cáo ra file Markdown")
+    sp.add_argument("--profile", help="thư mục profile trình duyệt "
+                                      "(mặc định data/browser_profile)")
+    sp.add_argument("--login-timeout", type=float, default=300.0,
+                    help="giây chờ đăng nhập (mặc định 300)")
+    sp.add_argument("--delay-min", type=float, default=2.0,
+                    help="giây nghỉ tối thiểu giữa hai dòng (mặc định 2)")
+    sp.add_argument("--delay-max", type=float, default=5.0,
+                    help="giây nghỉ tối đa giữa hai dòng (mặc định 5)")
+    sp.add_argument("--no-wait", action="store_true",
+                    help="đóng trình duyệt ngay khi xong, không chờ Enter")
+    sp.set_defaults(func=cmd_cart)
 
     sp = sub.add_parser("shops", help="liệt kê shop đang cấu hình")
     common(sp, need_bom=False)
