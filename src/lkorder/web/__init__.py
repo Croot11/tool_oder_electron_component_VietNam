@@ -12,17 +12,21 @@ nhân, không có đăng nhập, nên đừng mở ra mạng ngoài.
 from __future__ import annotations
 
 import json
+import random
 import threading
+import time
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from typing import Any, Callable
+from urllib.parse import parse_qs, urlsplit
 
 from .. import bom as bom_mod
 from .. import config
 from ..catalog import DEFAULT_MIN_SCORE, Catalog, load_offers_csv
 from ..catalog import resolve as resolve_bom
-from ..models import Shop, Solution
+from ..models import BomLine, Shop, Solution
 from ..optimizer import Options, compare_scenarios, solve
 
 HERE = Path(__file__).resolve().parent
@@ -84,18 +88,239 @@ def shop_json(s: Shop) -> dict:
     }
 
 
+# ------------------------------------------------------- tác vụ bỏ giỏ nền
+
+# Nhóm kết quả hiển thị cho người dùng
+GROUP_OF = {
+    "added": "added",           # đã thêm vào giỏ
+    "not_found": "not_found",   # không thấy
+    "uncertain": "check",       # cần kiểm tra
+    "error": "check",
+}
+
+
+def shop_base_url(link: str) -> str:
+    """'https://shop.vn/collections/ic?x=1' -> 'https://shop.vn'. Sai thì ''."""
+    parts = urlsplit((link or "").strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def shop_url_ok(link: str) -> bool:
+    return bool(shop_base_url(link))
+
+
+def _host(url: str) -> str:
+    h = urlsplit(url or "").netloc.lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def line_result_json(res: Any) -> dict:
+    """LineResult (browser.cart) -> dict. Đọc kiểu duck-typing cho dễ test."""
+    prod = getattr(res, "product", None)
+    status = getattr(res, "status", "error")
+    return {
+        "status": status,
+        "group": GROUP_OF.get(status, "check"),
+        "title": getattr(prod, "title", "") if prod else "",
+        "url": getattr(prod, "url", "") if prod else "",
+        "price": getattr(prod, "price", 0) if prod else 0,
+        "units": getattr(res, "units", 0),
+        "pieces": getattr(res, "pieces", 0),
+        "query": getattr(res, "query", ""),
+        "message": getattr(res, "message", ""),
+        "candidates": [
+            {"title": c.title, "url": c.url, "price": c.price,
+             "score": round(c.score, 2)}
+            for c in (getattr(res, "candidates", None) or [])[:3]
+        ],
+    }
+
+
+class CartJob:
+    """Trạng thái một lượt bỏ giỏ chạy nền. Mọi thao tác đều có khoá."""
+
+    def __init__(self, lines: list[BomLine], shop_url: str, filename: str = "") -> None:
+        self.id = uuid.uuid4().hex[:10]
+        self.lines = lines
+        self.shop_url = shop_url
+        self.filename = filename
+        self.status = "running"          # running / done / cancelled / error
+        self.error = ""
+        self.log_lines: list[str] = []
+        self.started = time.time()
+        self.finished: float | None = None
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()
+        self.items: list[dict] = [
+            {"i": i, "need": ln.raw or ln.key, "qty": ln.qty,
+             "status": "pending", "group": ""}
+            for i, ln in enumerate(lines)
+        ]
+
+    # --- runner gọi
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def log(self, msg: str) -> None:
+        with self._lock:
+            self.log_lines.append(str(msg))
+            del self.log_lines[:-50]
+
+    def start_line(self, i: int) -> None:
+        with self._lock:
+            self.items[i]["status"] = "running"
+
+    def finish_line(self, i: int, res: Any) -> None:
+        data = line_result_json(res)
+        with self._lock:
+            self.items[i].update(data)
+
+    def finish(self, status: str = "done", error: str = "") -> None:
+        with self._lock:
+            # dòng chưa chạy tới (bị dừng / lỗi) đánh dấu bỏ qua
+            for it in self.items:
+                if it["status"] in ("pending", "running"):
+                    it["status"] = "skipped"
+                    it["group"] = "check"
+                    it.setdefault("message", "")
+                    it["message"] = it["message"] or "chưa chạy tới"
+            self.status, self.error = status, error
+            self.finished = time.time()
+
+    # --- giao diện đọc
+    def to_json(self) -> dict:
+        with self._lock:
+            items = [dict(it) for it in self.items]
+            counts = {"added": 0, "not_found": 0, "check": 0}
+            done = 0
+            for it in items:
+                if it["status"] not in ("pending", "running"):
+                    done += 1
+                if it.get("group") in counts:
+                    counts[it["group"]] += 1
+            return {
+                "id": self.id,
+                "status": self.status,
+                "error": self.error,
+                "shop_url": self.shop_url,
+                "filename": self.filename,
+                "total": len(items),
+                "done": done,
+                "counts": counts,
+                "items": items,
+                "log": list(self.log_lines[-8:]),
+                "elapsed": round((self.finished or time.time()) - self.started, 1),
+            }
+
+
+# runner(lines, shop_url, job, shops) — chạy đồng bộ trong luồng nền,
+# báo tiến độ qua job.start_line / job.finish_line, dừng sớm khi job.cancelled.
+CartRunner = Callable[[list[BomLine], str, CartJob, dict], None]
+
+
+def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
+                        shops: dict[str, Shop]) -> None:
+    """Runner thật: mở Chrome bằng profile đã đăng nhập, bỏ từng dòng vào giỏ.
+
+    KHÔNG thanh toán — CartFiller từ chối mọi nút kiểu "thanh toán".
+    """
+    from ..browser import BrowserSession
+    from ..browser.cart import DEFAULT_DELAY, CartFiller
+
+    base = shop_base_url(shop_url)
+    host = _host(base)
+    platform = next((s.platform for s in shops.values()
+                     if s.url and _host(s.url) == host), "")
+    job.log("Đang mở trình duyệt…")
+    with BrowserSession() as session:
+        page = session.open_shop(shop_url, notify=job.log)
+        job.log("Đã vào shop, bắt đầu tìm từng linh kiện.")
+        filler = CartFiller(page, base, platform=platform)
+        for i, line in enumerate(lines):
+            if job.cancelled:
+                return
+            if i:
+                lo, hi = DEFAULT_DELAY
+                time.sleep(random.uniform(lo, hi))
+            job.start_line(i)
+            job.finish_line(i, filler.add_line(line))
+
+
 # ------------------------------------------------------------------ xử lý
 
 
 class App:
     """Giữ cấu hình và catalog, nạp lại khi file trên đĩa đổi."""
 
-    def __init__(self, shops_path: Path | None, catalog_path: Path | None) -> None:
+    def __init__(self, shops_path: Path | None, catalog_path: Path | None,
+                 cart_runner: CartRunner | None = None) -> None:
         self.shops_path = Path(shops_path) if shops_path else config.default_shops_path()
         self.catalog_path = (
             Path(catalog_path) if catalog_path else config.default_catalog_path()
         )
         self._lock = threading.Lock()
+        self.cart_runner: CartRunner = cart_runner or browser_cart_runner
+        self._jobs: dict[str, CartJob] = {}
+        self._last_job: CartJob | None = None
+        self._threads: dict[str, threading.Thread] = {}
+
+    # --- bỏ giỏ nền
+
+    def start_cart(self, payload: dict) -> dict:
+        lines = bom_mod.parse_any(payload.get("bom") or "")
+        if not lines:
+            return {"error": "File BOM không có linh kiện nào đọc được."}
+        shop_url = str(payload.get("shop_url") or "").strip()
+        if not shop_url_ok(shop_url):
+            return {"error": "Link shop phải bắt đầu bằng http:// hoặc https://"}
+        with self._lock:
+            cur = self._last_job
+            if cur is not None and cur.status == "running":
+                return {"error": "Đang chạy một lượt khác, chờ xong hoặc bấm Dừng."}
+            job = CartJob(lines, shop_url, str(payload.get("filename") or ""))
+            self._jobs = {job.id: job}        # chỉ giữ lượt gần nhất
+            self._last_job = job
+        shops = self.shops()
+
+        def work() -> None:
+            try:
+                self.cart_runner(lines, shop_url, job, shops)
+            except Exception as e:                       # noqa: BLE001
+                job.finish("error", f"{type(e).__name__}: {e}")
+                return
+            job.finish("cancelled" if job.cancelled else "done")
+
+        t = threading.Thread(target=work, name=f"cart-{job.id}", daemon=True)
+        self._threads = {job.id: t}
+        t.start()
+        return {"ok": True, "id": job.id, "total": len(lines)}
+
+    def job(self, job_id: str = "") -> dict:
+        job = self._jobs.get(job_id) if job_id else self._last_job
+        if job is None:
+            return {"job": None} if not job_id else {"error": "không có lượt chạy này"}
+        return {"job": job.to_json()}
+
+    def stop_cart(self, payload: dict) -> dict:
+        job_id = str(payload.get("id") or "")
+        job = self._jobs.get(job_id) if job_id else self._last_job
+        if job is None:
+            return {"error": "không có lượt chạy này"}
+        job.cancel()
+        job.log("Đã yêu cầu dừng, xong linh kiện đang làm sẽ dừng.")
+        return {"ok": True}
+
+    def wait_job(self, job_id: str, timeout: float = 10.0) -> None:
+        """Chờ luồng nền chạy xong (dùng trong test)."""
+        t = self._threads.get(job_id)
+        if t is not None:
+            t.join(timeout)
 
     def shops(self) -> dict[str, Shop]:
         return config.load_shops(self.shops_path)
@@ -277,6 +502,9 @@ def make_handler(app: App):
                 self._json(app.state())
             elif path == "/api/catalog":
                 self._json(app.read_catalog())
+            elif path == "/api/job":
+                q = parse_qs(urlsplit(self.path).query)
+                self._json(app.job((q.get("id") or [""])[0]))
             else:
                 self._json({"error": "không có trang này"}, 404)
 
@@ -294,6 +522,8 @@ def make_handler(app: App):
                 "/api/match": app.matches,
                 "/api/shops": app.save_shops,
                 "/api/catalog": app.save_catalog,
+                "/api/start": app.start_cart,
+                "/api/stop": app.stop_cart,
             }
             fn = routes.get(path)
             if fn is None:
