@@ -144,6 +144,15 @@
   .groups .n{font-size:20px;font-weight:700;display:block}
   .log{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--muted);
     white-space:pre-wrap;margin-top:6px}
+  /* ---------- sửa tên rồi quét lại ---------- */
+  .edit{display:flex;gap:6px;margin-top:6px;align-items:center}
+  .edit input[type=text]{padding:5px 8px;font-size:12.5px;min-width:150px}
+  .edit input.changed{border-color:var(--cta);background:var(--cta-bg)}
+  .edit button.mini{flex:none}
+  button.mini:disabled{opacity:.5;cursor:default}
+  .rq{color:var(--cta);font-size:12px}
+  .retrybar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+  .retrybar button.mini{border-color:var(--cta);color:var(--cta);font-weight:600}
 </style>
 </head>
 <body>
@@ -296,7 +305,9 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 });
 
 /* ---------- bỏ vào giỏ ---------- */
-const CART = {text:'', name:'', jobId:'', timer:null, filter:'all', last:null};
+// edits: chỉ số dòng -> tên tìm kiếm người dùng đã sửa (chưa gửi quét lại)
+const CART = {text:'', name:'', jobId:'', timer:null, filter:'all', last:null,
+  edits:{}, editsJob:'', retryMsg:''};
 const ST_LABEL = {pending:'chờ', running:'đang tìm…', added:'đã thêm',
   not_found:'không thấy', out_of_stock:'hết hàng', uncertain:'cần kiểm tra', error:'lỗi', skipped:'bỏ qua'};
 const GROUPS = [['added','Đã thêm vào giỏ'],['not_found','Không thấy'],
@@ -378,15 +389,44 @@ function watchJob(id){
   tick();
 }
 
+/* ---------- sửa tên rồi quét lại ---------- */
+// Tên mặc định trong ô sửa: chuỗi đã dùng để tìm; trống thì tên trong BOM.
+const defaultQuery = it => it.retry_skipped || it.query || it.need || '';
+// Dòng được sửa tên: chưa thêm vào giỏ và không đang chờ/chạy.
+const editable = it => it.group !== 'added' && it.status !== 'added'
+  && it.status !== 'pending' && it.status !== 'running';
+const editedValue = it => {
+  const v = (CART.edits[it.i] ?? '').trim();
+  return v && v !== defaultQuery(it).trim() ? v : '';
+};
+function changedItems(j){
+  return j.items.filter(it => editable(it) && editedValue(it))
+    .map(it => ({i: it.i, query: editedValue(it)}));
+}
+async function retryItems(items){
+  const j = CART.last;
+  if (!j || !items.length) return;
+  let r;
+  try { r = await api('/api/cart/retry', {id: j.id, items}); }
+  catch (e) { r = {error: 'Không gọi được máy chủ: ' + e}; }
+  if (r.error){ CART.retryMsg = r.error; renderJob(CART.last); return; }
+  CART.retryMsg = '';
+  items.forEach(x => delete CART.edits[x.i]);
+  watchJob(r.id);
+}
+
 function renderJob(j){
   CART.last = j;
+  if (CART.editsJob !== j.id){ CART.edits = {}; CART.editsJob = j.id; CART.retryMsg = ''; }
   const running = j.status === 'running';
-  const pct = j.total ? Math.round(100 * j.done / j.total) : 0;
+  const retrying = running && j.mode === 'retry';
+  const prog = retrying && j.retry ? j.retry : {done: j.done, total: j.total};
+  const pct = prog.total ? Math.round(100 * prog.done / prog.total) : 0;
   let h = '<div class="card">';
-  h += `<h2>${running ? 'Đang chạy' : 'Kết quả'} — ${esc(j.filename || 'BOM')}
+  h += `<h2>${retrying ? 'Đang quét lại' : running ? 'Đang chạy' : 'Kết quả'} — ${esc(j.filename || 'BOM')}
     <span class="sub" style="text-transform:none;font-weight:400"> · ${esc(j.shop_url)}</span></h2>`;
   h += `<div class="bar"><i style="width:${pct}%"></i></div>
-    <div class="row" style="align-items:center"><span class="sub">${j.done}/${j.total} linh kiện · ${j.elapsed}s</span>
+    <div class="row" style="align-items:center"><span class="sub">${prog.done}/${prog.total} ${retrying ? 'dòng quét lại' : 'linh kiện'} · ${j.elapsed}s</span>
     ${running ? '<span style="flex:none"><button class="mini" id="stopbtn">Dừng</button></span>' : ''}</div>`;
   if (j.status === 'error') h += `<div class="note bad" style="margin-top:12px"><b>Dừng vì lỗi:</b> ${esc(j.error)}</div>`;
   if (j.status === 'cancelled') h += '<div class="note warn" style="margin-top:12px">Đã dừng theo yêu cầu.</div>';
@@ -400,7 +440,18 @@ function renderJob(j){
   if (CART.filter !== 'all') h += `<div class="hint" style="margin-bottom:8px">Đang lọc —
     <a href="#" id="showall">xem tất cả</a></div>`;
 
-  const rows = j.items.filter(it => CART.filter === 'all' || it.group === CART.filter);
+  if (j.items.some(editable)){
+    const n = changedItems(j).length;
+    h += `<div class="retrybar"><button class="mini" id="retryall" ${running || !n ? 'disabled' : ''}>
+      Quét lại các dòng đã sửa${n ? ` (${n})` : ''}</button>
+      <span class="hint" style="margin-top:0">Tên trong BOM khác tên ở shop? Sửa ô tên tìm kiếm rồi bấm
+      <b>Quét lại</b> — chỉ chạy lại đúng dòng đó, giữ nguyên số lượng.</span></div>`;
+  }
+  if (CART.retryMsg) h += `<div class="note bad">${esc(CART.retryMsg)}</div>`;
+
+  // dòng đang quét lại vẫn hiện khi đang lọc, để thấy tiến độ
+  const rows = j.items.filter(it => CART.filter === 'all' || it.group === CART.filter
+    || (it.retry_query && (it.status === 'pending' || it.status === 'running')));
   h += `<table><thead><tr><th>#</th><th>Cần</th><th>Trạng thái</th><th>Sản phẩm ở shop</th>
     <th class="num">SL đặt</th></tr></thead><tbody>`;
   rows.forEach(it => {
@@ -411,8 +462,18 @@ function renderJob(j){
       ? '<div class="sub">Gần giống: ' + it.candidates.map(c =>
           `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title)}</a> (${c.score})`).join(' · ') + '</div>'
       : '';
+    let need = `${esc(it.need)} <span class="sub">× ${it.qty}</span>`;
+    if (it.retry_query) need += `<div class="rq">tìm bằng: <b>${esc(it.retry_query)}</b></div>`;
+    if (it.retry_skipped) need += `<div class="rq">chưa quét lại bằng “${esc(it.retry_skipped)}” (đã dừng)</div>`;
+    if (editable(it)){
+      const v = CART.edits[it.i] ?? defaultQuery(it);
+      need += `<div class="edit"><input type="text" data-edit="${it.i}" value="${esc(v)}"
+          spellcheck="false" title="Tên dùng để tìm trên shop (tên trong BOM: ${esc(it.need)})"
+          class="${editedValue(it) ? 'changed' : ''}">
+        <button class="mini" data-retry="${it.i}" ${running ? 'disabled' : ''}>Quét lại</button></div>`;
+    }
     h += `<tr><td class="sub">${it.i+1}</td>
-      <td>${esc(it.need)} <span class="sub">× ${it.qty}</span></td>
+      <td>${need}</td>
       <td><span class="st ${esc(it.status)}">${it.status==='running'?'<span class="spin"></span>':''}${ST_LABEL[it.status]||esc(it.status)}</span></td>
       <td>${prod}${it.message ? `<div class="sub">${esc(it.message)}</div>` : ''}${cands}</td>
       <td class="num">${it.units ? it.units + (it.pieces && it.pieces !== it.units ? ` <span class="sub">(${it.pieces} con)</span>` : '') : ''}</td></tr>`;
@@ -421,7 +482,39 @@ function renderJob(j){
   h += '</tbody></table></div>';
 
   const out = $('#jobout');
+  // poll vẽ lại mỗi giây: giữ con trỏ trong ô đang gõ
+  const ae = document.activeElement;
+  const focus = ae && ae.dataset && ae.dataset.edit !== undefined
+    ? {i: ae.dataset.edit, s: ae.selectionStart, e: ae.selectionEnd} : null;
   out.innerHTML = h;
+  if (focus){
+    const el = out.querySelector(`[data-edit="${focus.i}"]`);
+    if (el){ el.focus(); try { el.setSelectionRange(focus.s, focus.e); } catch (e) {} }
+  }
+  const itemOf = i => j.items.find(x => x.i === +i);
+  out.querySelectorAll('[data-edit]').forEach(el => {
+    el.oninput = () => {
+      CART.edits[el.dataset.edit] = el.value;
+      const it = itemOf(el.dataset.edit);
+      el.classList.toggle('changed', !!(it && editedValue(it)));
+      const ra = $('#retryall'), n = changedItems(j).length;
+      if (ra){ ra.disabled = j.status === 'running' || !n;
+               ra.textContent = 'Quét lại các dòng đã sửa' + (n ? ` (${n})` : ''); }
+    };
+    el.onkeydown = e => {
+      if (e.key === 'Enter'){ e.preventDefault();
+        const b = out.querySelector(`[data-retry="${el.dataset.edit}"]`); if (b && !b.disabled) b.click(); }
+    };
+  });
+  out.querySelectorAll('[data-retry]').forEach(b => b.onclick = () => {
+    const el = out.querySelector(`[data-edit="${b.dataset.retry}"]`);
+    const q = (el ? el.value : '').trim();
+    if (!q){ CART.retryMsg = `Dòng ${+b.dataset.retry + 1}: tên tìm kiếm trống.`; renderJob(CART.last); return; }
+    b.disabled = true;
+    retryItems([{i: +b.dataset.retry, query: q}]);
+  });
+  const ra = $('#retryall');
+  if (ra) ra.onclick = () => { ra.disabled = true; retryItems(changedItems(j)); };
   out.querySelectorAll('[data-g]').forEach(b => b.onclick = () => {
     CART.filter = CART.filter === b.dataset.g ? 'all' : b.dataset.g; renderJob(CART.last); });
   const sa = $('#showall');

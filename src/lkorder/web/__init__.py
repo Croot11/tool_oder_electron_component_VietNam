@@ -33,6 +33,7 @@ from .. import config
 from ..catalog import DEFAULT_MIN_SCORE, Catalog, load_offers_csv
 from ..catalog import resolve as resolve_bom
 from ..models import BomLine, Shop, Solution
+from ..normalize import normalize
 from ..optimizer import Options, compare_scenarios, solve
 
 HERE = Path(__file__).resolve().parent
@@ -271,6 +272,36 @@ class CartJob:
              "status": "pending", "group": ""}
             for i, ln in enumerate(lines)
         ]
+        # Quét lại: "full" = lượt đầy đủ, "retry" = đang/đã quét lại vài dòng.
+        self.mode = "full"
+        # chỉ số dòng -> kết quả cũ, giữ trong lúc quét lại để khôi phục nếu dừng
+        self._retry_old: dict[int, dict] = {}
+
+    # --- quét lại vài dòng bằng tên đã sửa
+    def begin_retry(self, edits: dict[int, str]) -> str:
+        """Đặt các dòng `edits` (chỉ số -> tên mới) về chờ quét lại.
+
+        Trả chuỗi lỗi nếu không hợp lệ (khi đó không đổi gì), "" nếu được.
+        Gọi khi lượt hiện tại KHÔNG chạy (App kiểm tra trước).
+        """
+        with self._lock:
+            for i in edits:
+                if not 0 <= i < len(self.items):
+                    return f"Dòng {i + 1} không có trong lượt này."
+                if self.items[i].get("status") == "added":
+                    return (f"Dòng {i + 1} ({self.items[i]['need']}) đã thêm "
+                            f"vào giỏ, không quét lại.")
+            self._retry_old = {i: dict(self.items[i]) for i in edits}
+            for i, q in edits.items():
+                old = self.items[i]
+                self.items[i] = {"i": i, "need": old["need"], "qty": old["qty"],
+                                 "status": "pending", "group": "",
+                                 "retry_query": q}
+            self.mode = "retry"
+            self.status, self.error = "running", ""
+            self.started, self.finished = time.time(), None
+            self._cancel.clear()
+            return ""
 
     # --- runner gọi
     @property
@@ -296,13 +327,23 @@ class CartJob:
 
     def finish(self, status: str = "done", error: str = "") -> None:
         with self._lock:
-            # dòng chưa chạy tới (bị dừng / lỗi) đánh dấu bỏ qua
-            for it in self.items:
-                if it["status"] in ("pending", "running"):
-                    it["status"] = "skipped"
-                    it["group"] = "check"
-                    it.setdefault("message", "")
-                    it["message"] = it["message"] or "chưa chạy tới"
+            for k, it in enumerate(self.items):
+                if it["status"] not in ("pending", "running"):
+                    continue
+                old = self._retry_old.get(k)
+                if old is not None:
+                    # quét lại bị dừng/lỗi trước khi tới dòng này: giữ kết quả
+                    # cũ (vẫn đúng), ghi chú tên đã sửa chưa được dùng
+                    old = dict(old)
+                    old["retry_skipped"] = it.get("retry_query", "")
+                    self.items[k] = old
+                    continue
+                # dòng chưa chạy tới (bị dừng / lỗi) đánh dấu bỏ qua
+                it["status"] = "skipped"
+                it["group"] = "check"
+                it.setdefault("message", "")
+                it["message"] = it["message"] or "chưa chạy tới"
+            self._retry_old = {}
             self.status, self.error = status, error
             self.finished = time.time()
 
@@ -317,9 +358,16 @@ class CartJob:
                     done += 1
                 if it.get("group") in counts:
                     counts[it["group"]] += 1
+            retry = None
+            if self._retry_old:          # đang quét lại: tiến độ riêng
+                retry = {"total": len(self._retry_old),
+                         "done": sum(1 for k in self._retry_old
+                                     if items[k]["status"] not in ("pending", "running"))}
             return {
                 "id": self.id,
                 "status": self.status,
+                "mode": self.mode,
+                "retry": retry,
                 "error": self.error,
                 "shop_url": self.shop_url,
                 "filename": self.filename,
@@ -332,8 +380,54 @@ class CartJob:
             }
 
 
+class RetryView:
+    """Cho runner thấy vài dòng quét lại như một lượt riêng.
+
+    Runner đánh số dòng 0..n-1 trên danh sách BomLine mới; lớp này đổi về
+    chỉ số thật trong CartJob, nên dùng lại nguyên `browser_cart_runner`
+    (cùng phiên trình duyệt, độ trễ, chặn thanh toán) mà không phải sửa.
+    """
+
+    def __init__(self, job: CartJob, index: list[int]) -> None:
+        self.job, self.index = job, list(index)
+
+    @property
+    def id(self) -> str:
+        return self.job.id
+
+    @property
+    def cancelled(self) -> bool:
+        return self.job.cancelled
+
+    def cancel(self) -> None:
+        self.job.cancel()
+
+    def log(self, msg: str) -> None:
+        self.job.log(msg)
+
+    def start_line(self, k: int) -> None:
+        self.job.start_line(self.index[k])
+
+    def finish_line(self, k: int, res: Any) -> None:
+        self.job.finish_line(self.index[k], res)
+
+
+def retry_line(orig: BomLine, query: str) -> BomLine | None:
+    """BomLine mới để tìm bằng tên đã sửa: giữ qty/designator của dòng gốc.
+
+    Không mang theo alt_keys của dòng gốc — kết quả phải đến từ đúng tên
+    người dùng gõ. Tên chuẩn hoá ra rỗng thì None.
+    """
+    key = normalize(query)
+    if not key:
+        return None
+    return BomLine(key=key, qty=orig.qty, raw=query,
+                   designator=orig.designator, required=orig.required)
+
+
 # runner(lines, shop_url, job, shops) — chạy đồng bộ trong luồng nền,
 # báo tiến độ qua job.start_line / job.finish_line, dừng sớm khi job.cancelled.
+# Khi quét lại, `job` là một RetryView (cùng giao diện).
 CartRunner = Callable[[list[BomLine], str, CartJob, dict], None]
 
 
@@ -410,11 +504,15 @@ class App:
             job = CartJob(lines, shop_url, str(payload.get("filename") or ""))
             self._jobs = {job.id: job}        # chỉ giữ lượt gần nhất
             self._last_job = job
-        shops = self.shops()
+        self._spawn(job, lines, job, self.shops())
+        return {"ok": True, "id": job.id, "total": len(lines)}
 
+    def _spawn(self, job: CartJob, lines: list[BomLine], target: Any,
+               shops: dict[str, Shop]) -> None:
+        """Chạy runner trong luồng nền; xong thì chốt trạng thái lượt."""
         def work() -> None:
             try:
-                self.cart_runner(lines, shop_url, job, shops)
+                self.cart_runner(lines, job.shop_url, target, shops)
             except Exception as e:                       # noqa: BLE001
                 job.finish("error", f"{type(e).__name__}: {e}")
                 return
@@ -423,7 +521,44 @@ class App:
         t = threading.Thread(target=work, name=f"cart-{job.id}", daemon=True)
         self._threads = {job.id: t}
         t.start()
-        return {"ok": True, "id": job.id, "total": len(lines)}
+
+    def retry_cart(self, payload: dict) -> dict:
+        """Quét lại vài dòng của lượt gần nhất bằng tên đã sửa.
+
+        payload = {id: <job id>, items: [{i: <chỉ số dòng>, query: <tên mới>}]}.
+        Chỉ chạy đúng các dòng gửi lên, cùng shop_url, giữ qty/designator.
+        Kết quả ghi đè vào chính dòng đó trong CartJob; giao diện poll như cũ.
+        """
+        job_id = str(payload.get("id") or "")
+        job = self._jobs.get(job_id) if job_id else None
+        if job is None:
+            return {"error": "Không có lượt chạy này (có thể đã bắt đầu lượt mới)."}
+        raw = payload.get("items")
+        if not isinstance(raw, list) or not raw:
+            return {"error": "Chưa chọn dòng nào để quét lại."}
+        edits: dict[int, str] = {}
+        for it in raw:
+            i = it.get("i") if isinstance(it, dict) else None
+            if isinstance(i, bool) or not isinstance(i, int):
+                return {"error": f"Chỉ số dòng không hợp lệ: {i!r}"}
+            q = " ".join(str(it.get("query") or "").split())
+            if not q or not normalize(q):
+                return {"error": f"Dòng {i + 1}: tên tìm kiếm trống."}
+            edits[i] = q                       # trùng chỉ số: lấy lần cuối
+        with self._lock:
+            cur = self._last_job
+            if cur is not None and cur.status == "running":
+                return {"error": "Đang chạy một lượt khác, chờ xong hoặc bấm Dừng."}
+            if job is not cur:
+                return {"error": "Chỉ quét lại được lượt gần nhất."}
+            err = job.begin_retry(edits)
+            if err:
+                return {"error": err}
+        index = sorted(edits)
+        lines = [retry_line(job.lines[i], edits[i]) for i in index]
+        job.log(f"Quét lại {len(index)} dòng bằng tên đã sửa…")
+        self._spawn(job, lines, RetryView(job, index), self.shops())
+        return {"ok": True, "id": job.id, "total": len(index)}
 
     def job(self, job_id: str = "") -> dict:
         job = self._jobs.get(job_id) if job_id else self._last_job
@@ -673,6 +808,7 @@ def make_handler(app: App):
                 "/api/catalog": app.save_catalog,
                 "/api/start": app.start_cart,
                 "/api/stop": app.stop_cart,
+                "/api/cart/retry": app.retry_cart,
             }
             fn = routes.get(path)
             if fn is None:
