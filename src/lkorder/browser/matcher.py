@@ -519,6 +519,10 @@ def _score_passive(pq, query: str, title: str) -> tuple[float, str]:
         else:
             score -= 0.25
             reasons.append(f"lệch chân: {pt.package} ≠ {pq.package}")
+    if pq.kind in ("resistor", "capacitor") and is_array(title) \
+            and not is_array(query):
+        score -= 0.7
+        reasons.append(ARRAY_REASON)
     return max(0.0, min(1.0, score)), "; ".join(reasons)
 
 
@@ -540,6 +544,23 @@ def _score_generic(pq, query: str, title: str) -> tuple[float, str]:
     return max(0.0, min(1.0, sim)), f"giống {sim:.0%}"
 
 
+_GENERIC_SMD = {"smd", "smt"}
+_THT_PKG = re.compile(r"^(?:dip|pdip|tht|to92|to220|to126|to247)\d*$")
+
+
+def _pkg_differs(a: str, b: str) -> bool:
+    """Hai kiểu chân khác nhau. 'smd' chung chung khớp mọi kiểu dán (sop4, sot23)."""
+    if not a or not b:
+        return False
+    a, b = re.sub(r"^soic", "sop", a), re.sub(r"^soic", "sop", b)  # SOIC = SOP
+    if a == b:
+        return False
+    if a in _GENERIC_SMD or b in _GENERIC_SMD:
+        other = b if a in _GENERIC_SMD else a
+        return bool(_THT_PKG.match(other))
+    return True
+
+
 def score_title(query: str, title: str) -> tuple[float, str]:
     """Điểm 0..1 cho việc `title` (tên trên shop) đúng là `query` (tên trong BOM).
 
@@ -551,7 +572,7 @@ def score_title(query: str, title: str) -> tuple[float, str]:
     if pq.kind == "mpn":
         score, why = _score_mpn(pq.mpn, query, title)
         pt = parse(title)
-        if score > 0 and pq.package and pt.package and pq.package != pt.package:
+        if score > 0 and _pkg_differs(pq.package, pt.package):
             score -= 0.25
             why += f"; lệch chân: {pt.package} ≠ {pq.package}"
         return max(0.0, score), why
@@ -602,6 +623,37 @@ _PACK_BEFORE = {"goi", "tui", "bich", "set", "cuon", "hop", "lot", "pack", "x"}
 _COUNT_AFTER = {"con", "cai", "chiec", "pcs", "pc", "c", "vien"}
 
 
+# Điện trở/tụ BĂNG (mạng, array): nhiều con chung một vỏ — "Điện trở băng 2.2K
+# 0603x4", "Tụ 100nF 0603x4", "8P4R", "R_Array_Convex_4x0603", "RN1".
+# Linh kiện đơn (R_0603, C_0603...) tuyệt đối không được khớp với hàng băng.
+_ARRAY_FOLD_RE = re.compile(
+    r"\b(?:array|network|networks|rnet)\b"
+    r"|(?<![\d.,])(?:0201|0402|0603|0805|1206)\s*x\s*\d{1,2}(?![\da-z.,])"
+    r"|(?<![\d.,])\d{1,2}\s*x\s*(?:0201|0402|0603|0805|1206)(?![\d.,])"
+    r"|\b\d{1,2}p\d{1,2}r\b"
+    r"|\brn\d*\b")
+# "0603x4", "4x0603", "8p4r": trông như mã linh kiện nhưng chỉ là kiểu băng.
+_ARRAY_MPN_RE = re.compile(r"\d{4}x\d{1,2}|\d{1,2}x\d{4}|\d{1,2}p\d{1,2}r")
+_ARRAY_ACCENT_RE =re.compile(r"(?<![^\W\d_])băng(?![^\W\d_])")
+
+
+def is_array(text: str) -> bool:
+    """Tên/dòng BOM là điện trở/tụ BĂNG (array/network), không phải con đơn.
+
+    "Điện trở băng 2.2K 0603x4", "Tụ 100nF 0603x4 50V", "8P4R", "R_Array",
+    "Resistor network". Chữ "bảng" (bỏ dấu cũng thành "bang") không tính.
+    """
+    if not text:
+        return False
+    if _ARRAY_ACCENT_RE.search(text.lower()):
+        return True
+    t = re.sub(r"[_]+", " ", _fold(text))
+    return bool(_ARRAY_FOLD_RE.search(t))
+
+
+ARRAY_REASON = "hàng băng/array ≠ linh kiện đơn"
+
+
 def canon_size(code: str) -> str:
     code = code.lower()
     return _METRIC_TO_INCH.get(code, code)
@@ -616,6 +668,7 @@ class ValueSpec:
     size: str           # đã quy đổi (canon_size), vd "0603", "1206", "hc49"
     size_label: str     # như ghi trong BOM, vd "3216"
     attrs: dict[str, str] = field(default_factory=dict)
+    array: bool = False  # dòng BOM là điện trở/tụ băng (R_Array, RN...)
 
 
 def _strip_note(text: str) -> str:
@@ -739,7 +792,8 @@ def line_spec(line: BomLine) -> ValueSpec | None:
     if not text:
         return None
     p = parse(text)
-    if p.kind == "mpn" and not _HC49_RE.fullmatch(p.mpn):
+    if p.kind == "mpn" and not _HC49_RE.fullmatch(p.mpn) \
+            and not _ARRAY_MPN_RE.fullmatch(p.mpn):
         return None                     # có mã linh kiện: tìm theo mã
     kind = _detect_kind(text)
     if kind not in VALUE_KINDS:
@@ -751,7 +805,8 @@ def line_spec(line: BomLine) -> ValueSpec | None:
     if not canon:
         return None
     attrs = {u: v for u, v in p.attrs.items() if u != _VALUE_UNIT[kind]}
-    return ValueSpec(kind, value, canon[0], labels[0].upper(), attrs)
+    return ValueSpec(kind, value, canon[0], labels[0].upper(), attrs,
+                     array=is_array(text))
 
 
 def _fmt_num(x: float) -> str:
@@ -867,6 +922,11 @@ def score_spec(spec: ValueSpec, title: str) -> tuple[float, str]:
     if tkind in VALUE_KINDS and tkind != spec.kind:
         return 0.0, f"khác loại ({tkind})"
 
+    # -- băng/array: chỉ nhận khi chính dòng BOM là băng
+    title_array = is_array(title)
+    if title_array and not spec.array:
+        return 0.0, ARRAY_REASON
+
     # -- giá trị (bắt buộc)
     vals = _values_in(title, spec.kind)
     if not vals:
@@ -909,6 +969,10 @@ def score_spec(spec: ValueSpec, title: str) -> tuple[float, str]:
             if got is not None and got != want:
                 score -= 0.25
                 reasons.append(f"lệch {unit}: {got} ≠ {want}")
+
+    if spec.array and not title_array:
+        score -= 0.4
+        reasons.append("BOM là hàng băng nhưng tên không ghi băng/array")
 
     # -- loại xung đột rõ: trừ điểm
     m = _CONFLICT_WORDS.search(re.sub(r"[^a-z0-9]+", " ", _fold(title)))

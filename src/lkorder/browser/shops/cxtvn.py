@@ -47,9 +47,9 @@ from ..cart import (
     LineResult, is_checkout_like, units_to_order,
 )
 from ..matcher import (
-    ACCEPT_SCORE, CONSIDER_SCORE, MARGIN, MATCH, NONE, SURE_SCORE, Candidate,
-    MatchDecision, Node, _fold, detect_pack, parse_html, parse_price,
-    score_candidate, search_queries,
+    ACCEPT_SCORE, ARRAY_REASON, CONSIDER_SCORE, MARGIN, MATCH, NONE, SURE_SCORE,
+    Candidate, MatchDecision, Node, _fold, detect_pack, is_array, parse_html,
+    parse_price, score_candidate, search_queries,
 )
 from ..matcher import UNCERTAIN as M_UNCERTAIN
 
@@ -309,10 +309,48 @@ _PKG_RE = re.compile(
 _MODULE_RE = re.compile(r"\b(module|modul|kit|mach|board)\b")
 
 
+def _canon_pkg(p: str) -> str:
+    p = p.replace("-", "")
+    # SOIC-8 và SOP-8 là một (shop VN ghi lẫn lộn)
+    return "sop" + p[4:] if p.startswith("soic") else p
+
+
 def packages(text: str) -> set[str]:
-    """Kiểu chân trong tên: {'sod123', '0603'} (đã bỏ gạch nối)."""
-    t = _fold(text)
-    return {m.group(1).replace("-", "") for m in _PKG_RE.finditer(t)}
+    """Kiểu chân trong tên: {'sod123', '0603'} (đã bỏ gạch nối; SOIC = SOP)."""
+    t = _fold(text).replace("_", " ")
+    return {_canon_pkg(m.group(1)) for m in _PKG_RE.finditer(t)}
+
+
+# Nhóm kiểu chân: cắm lỗ (DIP/THT) hay dán (SMD/SOP/SOIC/SOT...).
+_SMD_RE = re.compile(
+    r"(?<![a-z0-9])(?:smd|smt|smdip|dan|"
+    r"sma|smb|smc|sod-?\d+[a-z]?|sot-?\d+[a-z]?|"
+    r"sop-?\d*|soic-?\d*|ssop-?\d*|tssop-?\d*|msop-?\d*|"
+    r"qfp-?\d*|lqfp-?\d*|tqfp-?\d*|qfn-?\d*|dfn-?\d*|"
+    r"0201|0402|0603|0805|1206|1210|1812|2010|2512)(?![a-z0-9])")
+_DIP_RE = re.compile(
+    r"(?<![a-z0-9])(?:dip-?\d*|pdip-?\d*|tht|chan cam|cam lo|xuyen lo)(?![a-z0-9])")
+
+
+def mount_kind(text: str) -> str:
+    """'smd' (dán), 'dip' (cắm lỗ) hoặc '' (không rõ / ghi cả hai)."""
+    t = re.sub(r"[_]+", " ", _fold(text))
+    smd, dip = bool(_SMD_RE.search(t)), bool(_DIP_RE.search(t))
+    if smd == dip:
+        return ""
+    return "smd" if smd else "dip"
+
+
+def _pkg_conflict(want: set[str], got: set[str]) -> bool:
+    """Hai bộ kiểu chân cụ thể không có cái nào chung ('dip' khớp 'dip4')."""
+    if not want or not got or want & got:
+        return False
+    for w in want:
+        for g in got:
+            a, b = re.sub(r"\d+$", "", w), re.sub(r"\d+$", "", g)
+            if a == b and (a == w or b == g):   # một bên không ghi số chân
+                return False
+    return True
 
 
 def _line_text(line: BomLine) -> str:
@@ -353,10 +391,25 @@ def cxt_score(line: BomLine, cand: Candidate) -> Candidate:
         score, why = cand.score, cand.reason
 
     want_pkg, got_pkg = packages(text), packages(cand.title)
-    if want_pkg and got_pkg and not (want_pkg & got_pkg):
+    want_mount, got_mount = mount_kind(text), mount_kind(cand.title)
+    if want_mount and got_mount and want_mount != got_mount:
+        score -= 0.7
+        reasons.append(f"sai kiểu chân: {got_mount.upper()} ≠ {want_mount.upper()}")
+    elif _pkg_conflict(want_pkg, got_pkg):
         score -= 0.7
         reasons.append(f"sai kiểu chân: {'/'.join(sorted(got_pkg))} ≠ "
                        f"{'/'.join(sorted(want_pkg))}")
+    elif want_mount and not got_mount and not got_pkg and _is_ic_line(line) \
+            and score >= ACCEPT_SCORE:
+        # BOM ghi rõ SMD/DIP mà tên shop không nói: không tự bỏ giỏ.
+        score = ACCEPT_SCORE - 0.05
+        reasons.append(f"tên không ghi kiểu chân ({want_mount.upper()}), "
+                       f"cần kiểm tra")
+
+    if pq.kind in ("resistor", "capacitor") and is_array(cand.title) \
+            and not is_array(text):
+        score -= 0.7
+        reasons.append(ARRAY_REASON)
 
     if _is_ic_line(line) and _MODULE_RE.search(_fold(cand.title)):
         score -= 0.7
@@ -1164,4 +1217,5 @@ __all__ = [
     "is_logged_in", "is_no_image", "oos_message", "LOGIN_COOKIES", "LOGIN_SIGNS",
     "detect_cxt_pack", "is_cxt_url", "is_multi_value", "packages",
     "parse_cxt_product", "parse_cxt_search", "spec_values",
+    "mount_kind",
 ]
