@@ -27,6 +27,24 @@ Trang của CXT không theo khuôn Haravan/Woo nên bộ đọc chung đoán sai
   có class ``addCart``); xác nhận khi ``.slcart`` tăng hoặc nút đổi sang
   "ĐÃ THÊM".
 
+* Tên chung: CXT đặt nhiều sản phẩm khác nhau cùng tên "Tụ 0603 không phân
+  cực" trong danh sách (`is_generic_title`); giá trị thật chỉ có ở trang chi
+  tiết. Với dòng BOM thụ động (tụ, điện trở, cuộn cảm) chưa có ứng viên khớp
+  chắc, mở trang chi tiết của các ứng viên tên chung (tối đa
+  ``MAX_DETAIL_PAGES`` trang mỗi dòng, nghỉ 2–5 giây, ưu tiên theo nhãn
+  "Thông số" đã biết / gợi ý từ tên file ảnh thumbnail), đọc tên thật từ thẻ
+  ``<title>`` (bỏ tiền tố "CXT – Từ ý tưởng đến sản phẩm - "), dự phòng tên
+  file ảnh chính và "Mã lưu trữ" (`cxt_real_name`), rồi chấm lại. Tên thật lưu
+  đệm theo URL trong cả lượt chạy. Quy cách gói lấy từ tên thật ("(20c)" = 20
+  con/dây), đơn vị bán đọc từ bảng giá ("Giá / Dây").
+* selectProduct(): trang tải đầy đủ của sản phẩm thuộc nhóm "Thông số"
+  (``#sanphamcungloai``) có nút CHO VÀO GIỎ/ĐẶT HÀNG gọi ``selectProduct()`` —
+  hàm này chỉ ``alert('Vui lòng lựa chọn thông số của sản phẩm')``, KHÔNG thêm
+  giỏ. Đây đúng là bước chọn sản phẩm: bấm link thông số của chính sản phẩm
+  trong ``#sanphamcungloai`` (ajax nạp lại ``#viewAjax``), khi đó nút mới gọi
+  ``addToCart(id, $('#sl').val())`` (đã đăng nhập) hoặc trỏ ``dang-nhap.html``
+  (chưa đăng nhập). Không bao giờ bấm nút ``selectProduct()``.
+
 AN TOÀN: tuyệt đối không bấm "ĐẶT HÀNG"/"MUA NGAY" (``.btn-buy``), không bấm
 nút nào gọi ``addToCart`` với tham số ``checkout`` hay tham số thứ 5 là
 ``true`` (mua ngay).
@@ -58,6 +76,7 @@ MIN_DELAY = 2.0                       # CXT: nghỉ 2–5 giây giữa các lư�
 DEFAULT_CXT_DELAY = (2.0, 5.0)
 VARIANT_FIELDS = ("kthuoc", "color")
 MAX_OOS_RETRY = 3                     # số lần chọn lại khi trang SP báo hết hàng
+MAX_DETAIL_PAGES = 10                 # số trang chi tiết tên chung mở mỗi dòng
 
 LOGIN_SELECTORS = ("a[href*='dang-xuat']", "a[href*='logout']")
 LOGIN_COOKIES = ("mem_logged", "mem_token")
@@ -84,6 +103,8 @@ class CxtCandidate(Candidate):
     variant: Optional[tuple[str, str, str]] = None  # (trường, value, nhãn)
     image: str = ""                                 # link ảnh trong kết quả
     stock_reason: str = ""                          # vì sao coi là hết hàng
+    generic_title: str = ""                         # tên chung trong danh sách
+    unit: str = ""                                  # đơn vị bán ("Dây")
 
 
 # ------------------------------------------------------------ hết hàng
@@ -502,6 +523,69 @@ def _pick_available(ranked: list[CxtCandidate], *, accept: float,
     return MatchDecision(MATCH, best, ranked, best.reason), group
 
 
+# ------------------------------------------------------------ tên chung
+
+_PASSIVE_KINDS = ("resistor", "capacitor", "inductor")
+_PASSIVE_UNITS = ("ohm", "f", "h")
+_PASSIVE_WORD_RE = re.compile(
+    r"(?<![a-z0-9])(?:tu dien|tu|dien tro|cuon cam|capacitor|resistor|inductor)"
+    r"(?![a-z0-9])")
+_CHIP_SIZES = {"0201", "0402", "0603", "0805", "1206", "1210", "1812", "2010",
+               "2512"}
+_CXT_TITLE_PREFIX_RE = re.compile(
+    r"^\s*cxt\s*[-–—]\s*tu y tuong den san pham\s*[-–—|:]\s*")
+_IMG_TAIL_RE = re.compile(r"[-_]img[-_]?\d+$", re.I)
+_STORAGE_RE = re.compile(r"ma luu tru\s*:?\s*([a-z0-9._-]+)")
+
+
+def is_generic_title(title: str) -> bool:
+    """Tên chung kiểu "Tụ 0603 không phân cực": có loại (tụ/điện trở/cuộn cảm)
+    + kích thước chân (0603...) nhưng không có giá trị đọc được."""
+    t = re.sub(r"[_]+", " ", _fold(title))
+    if not _PASSIVE_WORD_RE.search(t) or not (packages(title) & _CHIP_SIZES):
+        return False
+    if is_multi_value(title):
+        return False                      # "thông số từ 1K đến 99K": chỗ khác lo
+    vals = spec_values(title)
+    return not any(u in vals for u in _PASSIVE_UNITS)
+
+
+def is_passive_line(line: BomLine) -> bool:
+    """Dòng BOM là tụ / điện trở / cuộn cảm."""
+    text = _line_text(line)
+    if parse(text).kind in _PASSIVE_KINDS:
+        return True
+    return bool(_PASSIVE_WORD_RE.search(_fold(text))) and any(
+        u in spec_values(text) for u in _PASSIVE_UNITS)
+
+
+def image_hint(src: str) -> str:
+    """Gợi ý từ tên file ảnh: '.../tu-100nf-50v-10-0603-10c-img-1658908857.jpg'
+    -> 'tu 100nf 50v 10 0603 10c'. Ảnh giữ chỗ / không có -> ''."""
+    if not src or is_no_image(src):
+        return ""
+    stem = urlsplit(src.strip()).path.rsplit("/", 1)[-1]
+    stem = stem.rsplit(".", 1)[0] if "." in stem else stem
+    stem = _IMG_TAIL_RE.sub("", stem)
+    return re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", stem)).strip()
+
+
+def strip_cxt_title(title: str) -> str:
+    """Bỏ tiền tố 'CXT – Từ ý tưởng đến sản phẩm - ' của thẻ <title>."""
+    t = re.sub(r"\s+", " ", title or "").strip()
+    m = _CXT_TITLE_PREFIX_RE.match(_fold(t))
+    if m and len(_fold(t)) == len(t):     # bỏ dấu không đổi độ dài chuỗi
+        return t[m.end():].strip()
+    if m:                                 # phòng hờ: cắt theo dấu gạch sau "phẩm"
+        parts = re.split(r"\s[-–—|]\s", t, maxsplit=2)
+        return parts[-1].strip() if len(parts) == 3 else t
+    return t
+
+
+def _probe_score(line: BomLine, title: str) -> float:
+    return cxt_score(line, Candidate(title=title, url="")).score
+
+
 # ------------------------------------------------------------ trang sản phẩm
 
 
@@ -521,6 +605,13 @@ class CxtProduct:
     image: str = ""                       # ảnh chính của sản phẩm
     retail: Optional[int] = None          # giá "Bán lẻ" (None = không ghi)
     stock_reason: str = ""
+    page_title: str = ""                  # <title> đã bỏ tiền tố "CXT – ..."
+    storage_code: str = ""                # "Mã lưu trữ"
+    real_name: str = ""                   # tên thật (xem `cxt_real_name`)
+    unit: str = ""                        # đơn vị bán theo bảng giá ("Dây")
+    # các link "Thông số" (#sanphamcungloai): (href, nhãn, đang chọn)
+    siblings: list[tuple[str, str, bool]] = field(default_factory=list)
+    needs_select: bool = False            # nút giỏ gọi selectProduct()
 
     def price_for(self, units: int) -> int:
         """Đơn giá theo bậc ứng với số lượng `units` (0 nếu không có bảng)."""
@@ -551,6 +642,9 @@ def _parse_tiers(root: Node) -> list[tuple[int, int]]:
     head = root.find(lambda n: _has_class(n, "pricelist_head"))
     if head is None:
         return []
+    if head.tag in ("td", "th") and head.parent is not None \
+            and head.parent.tag == "tr":
+        head = head.parent                # trang thật: mỗi ô có class pricelist_head
     parent = head.parent
     if parent is None:
         return []
@@ -580,6 +674,58 @@ def _parse_tiers(root: Node) -> list[tuple[int, int]]:
         if q is not None and p:
             tiers.append((max(1, q), p))
     return tiers
+
+
+_UNIT_RE = re.compile(r"gi[aá]\s*/\s*([^\s\d<>/|:]+)", re.I)
+
+
+def _price_unit(root: Node) -> str:
+    """Đơn vị bán trong bảng giá: 'Giá / Dây' -> 'Dây'."""
+    head = root.find(lambda n: _has_class(n, "pricelist_head"))
+    scope = head.parent.parent if head is not None and head.parent is not None \
+        and head.parent.parent is not None else root
+    for n in scope.iter():
+        if _has_class(n, "pricelist_td") or n.tag in ("td", "th", "b"):
+            m = _UNIT_RE.search(n.text())
+            if m:
+                return m.group(1).strip()
+    return ""
+
+
+def _siblings(root: Node) -> list[tuple[str, str, bool]]:
+    box = root.find(lambda n: n.id == "sanphamcungloai")
+    if box is None:
+        return []
+    return [(a.get("href").strip(), a.text(), _has_class(a, "active"))
+            for a in box.find_all(lambda n: n.tag == "a")
+            if _ID_RE.search(a.get("href"))]
+
+
+def _page_title(root: Node) -> str:
+    t = root.find(lambda n: n.tag == "title")
+    text = t.text() if t is not None else ""
+    if not text:
+        pt = root.find(lambda n: n.id == "page-title")
+        text = pt.text() if pt is not None else ""
+    if not text:
+        og = root.find(lambda n: n.tag == "meta"
+                       and n.get("property").lower() == "og:title")
+        text = og.get("content") if og is not None else ""
+    return strip_cxt_title(text)
+
+
+def cxt_real_name(info: CxtProduct) -> str:
+    """Tên thật của sản phẩm: <title> (đã bỏ tiền tố) nếu có giá trị; không
+    thì tên + gợi ý từ tên file ảnh chính; không nữa thì tên + 'Mã lưu trữ'."""
+    shown = info.title or info.page_title
+    if info.page_title and not is_generic_title(info.page_title):
+        return info.page_title
+    hint = image_hint(info.image)
+    if hint and any(u in spec_values(hint) for u in _PASSIVE_UNITS):
+        return f"{shown} {hint}".strip()
+    if info.storage_code:
+        return f"{shown} (mã lưu trữ {info.storage_code})".strip()
+    return info.page_title or shown
 
 
 def _variant_options(root: Node) -> tuple[dict[str, list[tuple[str, str]]],
@@ -812,6 +958,11 @@ def parse_cxt_product(html: str, *, no_image_out_of_stock: bool = False
         t = _fold(b.text() or b.get("value"))
         if "da them" in t:
             info.added = True
+        if "selectproduct" in b.get("onclick").lower():
+            # Nút giả: chỉ báo "Vui lòng lựa chọn thông số" — chưa biết đăng nhập.
+            if _is_add_label(t):
+                info.needs_select = True
+            continue
         if _is_add_label(t) or "da them" in t:
             href = b.get("href").lower()
             onclick = b.get("onclick").lower()
@@ -845,6 +996,14 @@ def parse_cxt_product(html: str, *, no_image_out_of_stock: bool = False
     stock, why = _stock_of(price, info.image, shop_says_out, no_image_out_of_stock)
     if stock is False:
         info.in_stock, info.stock_reason = False, why
+
+    info.page_title = _page_title(root)
+    m = _STORAGE_RE.search(_fold(_main_text(root)))
+    if m:
+        info.storage_code = m.group(1).upper()
+    info.unit = _price_unit(root)
+    info.siblings = _siblings(root)
+    info.real_name = cxt_real_name(info)
     return info
 
 
@@ -917,11 +1076,18 @@ class CxtCartFiller(CartFiller):
         kwargs["delay"] = (lo, max(lo, hi))
         if kwargs.get("no_image_out_of_stock") is None:
             kwargs["no_image_out_of_stock"] = cxt_no_image_flag()
+        max_pages = kwargs.pop("max_detail_pages", MAX_DETAIL_PAGES)
         super().__init__(page, base_url, search_url=SEARCH_URL, **kwargs)
         self.logged_out = False
         # link sản phẩm -> lý do hết hàng, biết được khi vào trang sản phẩm
         self.known_oos: dict[str, str] = {}
         self._page_oos = False            # add_to_cart vừa gặp trang hết hàng
+        self.max_detail_pages = max_pages
+        # Bộ nhớ đệm cả lượt chạy: link -> trang chi tiết đã đọc (tên thật...),
+        # và link -> nhãn "Thông số" thấy trong #sanphamcungloai của trang khác.
+        self.detail_cache: dict[str, CxtProduct] = {}
+        self.sibling_labels: dict[str, str] = {}
+        self._detail_budget = max_pages   # số trang chi tiết còn được mở (dòng này)
 
     # -- tiện ích
 
@@ -970,6 +1136,8 @@ class CxtCartFiller(CartFiller):
         if "dang-nhap" in href.lower():
             return False
         onclick = self._attr(handle, "onclick")
+        if "selectproduct" in onclick.lower():
+            return False                  # chỉ alert "chọn thông số", không thêm giỏ
         if "addtocart" in onclick.lower() and not is_add_to_cart_onclick(onclick):
             return False
         return True
@@ -1000,10 +1168,103 @@ class CxtCartFiller(CartFiller):
         priced, zeros = parse_cxt_search(
             html, getattr(self.page, "url", "") or url,
             no_image_out_of_stock=self.no_image_out_of_stock)
-        for c in priced:                  # đã biết hết hàng qua trang sản phẩm
-            if c.url in self.known_oos:
+        for c in priced:
+            if c.url in self.detail_cache:    # đã đọc tên thật ở dòng trước
+                self._apply_detail(c, self.detail_cache[c.url])
+            if c.url in self.known_oos:       # đã biết hết hàng qua trang SP
                 c.in_stock, c.stock_reason = False, self.known_oos[c.url]
         return priced, zeros
+
+    # -- tên chung: đọc tên thật ở trang chi tiết
+
+    def _detail(self, url: str) -> CxtProduct:
+        """Trang chi tiết (đã đọc thì lấy từ bộ nhớ đệm, không mở lại)."""
+        info = self.detail_cache.get(url)
+        if info is None:
+            info = parse_cxt_product(self._goto(url),
+                                     no_image_out_of_stock=self.no_image_out_of_stock)
+            self.detail_cache[url] = info
+            for href, label, _active in info.siblings:
+                if label:
+                    self.sibling_labels.setdefault(urljoin(url, href), label)
+        return info
+
+    def _apply_detail(self, c: CxtCandidate, info: CxtProduct) -> None:
+        """Thay tên chung bằng tên thật; cập nhật gói, đơn vị, còn/hết hàng."""
+        real = info.real_name
+        if not real or not is_generic_title(c.generic_title or c.title):
+            return
+        if not c.generic_title:
+            c.generic_title = c.title
+        c.title = real
+        c.pack = detect_cxt_pack(real)
+        c.multi = is_multi_value(real)
+        c.unit = info.unit
+        if info.image:
+            c.image = info.image
+        if c.price <= 0 and info.tiers:
+            c.price = sorted(info.tiers)[0][1]
+        if info.in_stock is False:
+            self._mark_oos(c, info.stock_reason)
+        elif c.in_stock is False and c.stock_reason == REASON_NO_IMAGE \
+                and info.image and not is_no_image(info.image):
+            # Ảnh chính là ảnh thật: còn hàng (thumbnail danh sách có thể cũ).
+            c.in_stock, c.stock_reason = None, ""
+
+    def _hint_score(self, line: BomLine, c: CxtCandidate) -> float:
+        """Độ hứa hẹn của ứng viên tên chung, trước khi mở trang: nhãn
+        "Thông số" đã biết > gợi ý từ tên file ảnh thumbnail."""
+        label = self.sibling_labels.get(c.url, "")
+        if label:
+            return _probe_score(line, f"{c.title} {label}") + 1.0
+        hint = image_hint(c.image)
+        return _probe_score(line, f"{c.title} {hint}") if hint else 0.0
+
+    def _read_generic(self, line: BomLine, cands: list[CxtCandidate]) -> int:
+        """Mở trang chi tiết các ứng viên tên chung (còn hàng) để đọc tên thật.
+
+        Trả về số ứng viên vừa được thay tên. Tối đa `max_detail_pages` trang
+        MỚI cho mỗi dòng BOM (`_detail_budget`, đặt lại ở `find`); trang đã đọc
+        (bộ nhớ đệm) không tính, không nghỉ.
+        """
+        if not is_passive_line(line):
+            return 0
+        pending = [c for c in cands if not _is_oos(c) and not c.generic_title
+                   and is_generic_title(c.title)]
+        if not pending:
+            return 0
+        known = {c.url for c in cands}
+        changed = 0
+        while pending:
+            # Link "Thông số" ở trang đã mở mà khớp chắc dòng BOM: thêm vào
+            # hàng đợi kể cả khi danh sách tìm kiếm không có.
+            for url, label in list(self.sibling_labels.items()):
+                if url in known:
+                    continue
+                generic = pending[0].title
+                if _probe_score(line, f"{generic} {label}") >= self.accept:
+                    m = _ID_RE.search(url)
+                    extra = CxtCandidate(title=generic, url=url,
+                                         pid=m.group(1) if m else "")
+                    cands.append(extra)
+                    pending.append(extra)
+                    known.add(url)
+            pending.sort(key=lambda c: -self._hint_score(line, c))
+            c = pending.pop(0)
+            cached = c.url in self.detail_cache
+            if not cached:
+                if self._detail_budget <= 0:
+                    break
+                self._pause()
+                self._detail_budget -= 1
+            self._apply_detail(c, self._detail(c.url))
+            if not c.generic_title:
+                continue
+            changed += 1
+            cxt_score(line, c)
+            if not _is_oos(c) and c.score >= SURE_SCORE:
+                break
+        return changed
 
     def search(self, query: str) -> list[Candidate]:
         return [c for c in self.search_cxt(query)[0] if c.in_stock is not False]
@@ -1014,13 +1275,24 @@ class CxtCartFiller(CartFiller):
 
     def find(self, line: BomLine) -> tuple[MatchDecision, str]:
         best: tuple[MatchDecision, str] | None = None
+        self._detail_budget = self.max_detail_pages
         for q in search_queries(line):
             cands, zeros = self.search_cxt(q)
+            read_generic = False
             while True:
                 dec, group = cxt_pick(line, cands, zeros, accept=self.accept,
                                       consider=self.consider)
                 if dec.status != MATCH:
+                    # Chưa có món khớp chắc: đọc tên thật của các món tên chung
+                    # ("Tụ 0603 không phân cực") rồi chọn lại.
+                    if not read_generic:
+                        read_generic = True
+                        if self._read_generic(line, cands):
+                            continue
                     break
+                if getattr(dec.best, "generic_title", ""):
+                    dec.message = (f"{dec.message}; tên thật đọc từ trang sản "
+                                   f"phẩm (danh sách ghi '{dec.best.generic_title}')")
                 n_oos = len(self.known_oos)
                 dec = self._resolve(line, dec, group)
                 # Cả nhóm hết hàng (biết qua trang sản phẩm): chọn lại từ đầu,
@@ -1125,6 +1397,39 @@ class CxtCartFiller(CartFiller):
                 return False, "bấm CHO VÀO GIỎ nhưng không thấy giỏ tăng"
             self.sleep(self.poll)
 
+    def _choose_spec(self, cand: Candidate, info: CxtProduct
+                     ) -> tuple[Optional[CxtProduct], str]:
+        """Bước chọn sản phẩm thay cho selectProduct(): bấm link "Thông số" của
+        chính sản phẩm trong #sanphamcungloai, chờ ajax nạp nút giỏ thật.
+
+        Trả về (trang đã nạp lại, ghi chú) hoặc (None, lý do không làm được).
+        """
+        m = _ID_RE.search(cand.url)
+        pid = getattr(cand, "pid", "") or (m.group(1) if m else "")
+        link = None
+        for h in self._all("#sanphamcungloai a"):
+            hm = _ID_RE.search(self._attr(h, "href"))
+            if hm and hm.group(1) == pid:
+                link = h
+                break
+        if link is None:
+            return None, ("trang CXT bắt chọn thông số (selectProduct) nhưng "
+                          "không thấy link thông số của sản phẩm — cần chọn tay")
+        text, href = self._label(link)
+        if is_checkout_like(text, href) or _onclick_forbidden(self._attrs(link)):
+            raise CheckoutRefused(f"Từ chối bấm: {text!r}")
+        link.click()
+        deadline = self.clock() + self.confirm_timeout
+        while True:
+            fresh = parse_cxt_product(self.page.content(),
+                                      no_image_out_of_stock=self.no_image_out_of_stock)
+            if not fresh.needs_select:
+                return fresh, f"đã chọn thông số '{text.strip()}' (thay selectProduct)"
+            if self.clock() >= deadline:
+                return None, ("bấm chọn thông số nhưng nút CHO VÀO GIỎ vẫn gọi "
+                              "selectProduct() — cần chọn tay")
+            self.sleep(self.poll)
+
     def add_to_cart(self, line: BomLine, cand: Candidate) -> LineResult:
         if self.logged_out:
             return LineResult(line, ERROR, cand, message="chưa đăng nhập CXT")
@@ -1139,13 +1444,32 @@ class CxtCartFiller(CartFiller):
             self._page_oos = True
             return LineResult(line, OUT_OF_STOCK, cand, candidates=[cand],
                               message=oos_message(info.stock_reason))
+
+        notes: list[str] = []
+        if info.needs_select:
+            # Nút CHO VÀO GIỎ đang gọi selectProduct() (chỉ alert): chọn đúng
+            # "Thông số" của sản phẩm này trước, rồi đọc lại nút giỏ thật.
+            fresh, why = self._choose_spec(cand, info)
+            if fresh is None:
+                return LineResult(line, UNCERTAIN, cand, candidates=[cand],
+                                  message=why)
+            fresh.real_name = fresh.real_name or info.real_name
+            if fresh.cart_count is None:
+                fresh.cart_count = info.cart_count
+            info = fresh
+            notes.append(why)
+            if info.in_stock is False:
+                if isinstance(cand, CxtCandidate):
+                    self._mark_oos(cand, info.stock_reason)
+                self._page_oos = True
+                return LineResult(line, OUT_OF_STOCK, cand, candidates=[cand],
+                                  message=oos_message(info.stock_reason))
         if info.logged_in is False:
             self.logged_out = True
             return LineResult(line, ERROR, cand, candidates=[cand],
                               message="chưa đăng nhập CXT (nút CHO VÀO GIỎ trỏ "
                                       "tới dang-nhap.html) — đăng nhập rồi chạy lại")
 
-        notes: list[str] = []
         if info.variants:
             v = getattr(cand, "variant", None)
             if v is None or v[0] not in info.variants:
@@ -1163,8 +1487,10 @@ class CxtCartFiller(CartFiller):
                 info.cart_count = fresh.cart_count
             notes.append(f"biến thể {v[0]}={v[2]}")
 
-        pack = cand.pack if cand.pack > 1 else detect_cxt_pack(info.title)
+        pack = cand.pack if cand.pack > 1 else max(
+            detect_cxt_pack(info.real_name or ""), detect_cxt_pack(info.title))
         units = units_to_order(line.qty, pack, info.min_buy)
+        unit = info.unit or getattr(cand, "unit", "")
         before = info.cart_count
 
         sl = self._first(("#sl", "input#sl", "input[name='sl']"))
@@ -1183,12 +1509,15 @@ class CxtCartFiller(CartFiller):
         ok, why = self._wait_added_cxt(before, button)
         notes.insert(0, why)
         price = info.price_for(units)
+        per = unit.lower() if unit else "đv"
         if price:
             cand.price = price
             if len(info.tiers) > 1:
-                notes.append(f"giá bậc {price:,}₫/đv".replace(",", "."))
+                notes.append(f"giá bậc {price:,}₫/{per}".replace(",", "."))
         if pack > 1:
-            notes.append(f"gói {pack} con")
+            notes.append(f"gói {pack} con/{per}" if unit else f"gói {pack} con")
+        if unit:
+            notes.append(f"mua {units} {per}")
         if info.min_buy > 1:
             notes.append(f"mua tối thiểu {info.min_buy}")
         return LineResult(line, ADDED if ok else UNCERTAIN, cand, units,
@@ -1218,4 +1547,6 @@ __all__ = [
     "detect_cxt_pack", "is_cxt_url", "is_multi_value", "packages",
     "parse_cxt_product", "parse_cxt_search", "spec_values",
     "mount_kind",
+    "MAX_DETAIL_PAGES", "cxt_real_name", "image_hint", "is_generic_title",
+    "is_passive_line", "strip_cxt_title",
 ]
