@@ -42,6 +42,7 @@ ADDED = "added"
 NOT_FOUND = "not_found"
 UNCERTAIN = "uncertain"
 ERROR = "error"
+OUT_OF_STOCK = "out_of_stock"   # khớp đúng món nhưng shop hết hàng: không bỏ giỏ
 
 DEFAULT_DELAY = (2.0, 5.0)      # giây nghỉ giữa hai dòng BOM (ngẫu nhiên)
 CONFIRM_TIMEOUT = 8.0           # giây chờ giỏ hàng tăng sau khi bấm
@@ -261,7 +262,7 @@ def units_to_order(want: int, pack: int = 1, moq: int = 1, step: int = 1) -> int
 @dataclass
 class LineResult:
     line: BomLine
-    status: str                              # added / not_found / uncertain / error
+    status: str          # added / not_found / uncertain / error / out_of_stock
     product: Optional[Candidate] = None
     units: int = 0                           # số đơn vị bán đã điền
     pieces: int = 0                          # số linh kiện tương ứng
@@ -307,8 +308,12 @@ class CartFiller:
                  sleep: Callable[[float], None] = time.sleep,
                  rand: Callable[[float, float], float] = random.uniform,
                  clock: Callable[[], float] = time.monotonic,
-                 notify: Callable[[str], None] | None = None) -> None:
+                 notify: Callable[[str], None] | None = None,
+                 no_image_out_of_stock: bool = False) -> None:
         self.page = page
+        # data/shops.json "no_image_means_out_of_stock": shop có bộ xử lý riêng
+        # (vd CXT) coi sản phẩm không có ảnh là hết hàng.
+        self.no_image_out_of_stock = bool(no_image_out_of_stock)
         self.base_url = base_url.rstrip("/")
         self.search_url = search_url or SEARCH_URLS.get(platform, DEFAULT_SEARCH_URL)
         self.sel = selectors or CartSelectors()
@@ -470,6 +475,11 @@ class CartFiller:
     def add_line(self, line: BomLine) -> LineResult:
         try:
             dec, q = self.find(line)
+            if dec.status == OUT_OF_STOCK:
+                # Không bỏ giỏ, không chuyển sang shop khác: báo riêng "Hết hàng".
+                return LineResult(line, OUT_OF_STOCK, dec.best,
+                                  candidates=dec.shortlist, query=q,
+                                  message=dec.message)
             if dec.status == NONE:
                 return LineResult(line, NOT_FOUND, dec.best, candidates=dec.shortlist,
                                   query=q, message=dec.message)
@@ -506,7 +516,31 @@ def add_bom_to_cart(page: Any, lines: Iterable[BomLine], base_url: str,
 
 
 def summarize(results: Iterable[LineResult]) -> dict[str, int]:
-    counts = {ADDED: 0, NOT_FOUND: 0, UNCERTAIN: 0, ERROR: 0}
+    counts = {ADDED: 0, NOT_FOUND: 0, UNCERTAIN: 0, ERROR: 0, OUT_OF_STOCK: 0}
     for r in results:
         counts[r.status] = counts.get(r.status, 0) + 1
     return counts
+
+
+def shop_option(base_url: str, key: str, shops: Any = None,
+                default: Any = False) -> Any:
+    """Tuỳ chọn `key` của shop có cùng tên miền với `base_url` trong
+    data/shops.json (hoặc dict `shops` id -> Shop đã nạp). Không thấy -> default.
+    """
+    from urllib.parse import urlsplit
+
+    def host(u: str) -> str:
+        h = urlsplit(u if "://" in u else "https://" + u).netloc.lower()
+        return h[4:] if h.startswith("www.") else h
+
+    if shops is None:
+        try:
+            from ..config import load_shops
+            shops = load_shops()
+        except Exception:
+            return default
+    want = host(base_url or "")
+    for s in (shops.values() if isinstance(shops, dict) else shops):
+        if getattr(s, "url", "") and host(s.url) == want:
+            return getattr(s, key, default)
+    return default

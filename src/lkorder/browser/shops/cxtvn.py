@@ -4,9 +4,14 @@ Trang của CXT không theo khuôn Haravan/Woo nên bộ đọc chung đoán sai
 
 * Tìm kiếm: ``GET https://linhkien.cxtvn.com/tim-kiem.html?q=<kw>``. Mỗi sản
   phẩm là một ``.item_lkpa``: tên trong ``<h5>``, link dạng ``<id>-<slug>.html``,
-  giá ghi ``Bán lẻ: 1.500₫``. Món giá 0₫ (giá "liên hệ") bị bỏ khỏi danh sách
-  ứng viên — nếu chỉ còn những món đó thì dòng BOM thành ``uncertain`` để người
-  dùng tự kiểm tra.
+  giá ghi ``Bán lẻ: 1.500₫``, ảnh trong ``.imgitem_lkpa``.
+* Hết hàng: món giá 0₫, và (khi shops.json bật
+  ``"no_image_means_out_of_stock"``) món có ảnh là ``images/no_image.jpg`` —
+  kể cả ảnh chính trên trang sản phẩm — bị coi là hết hàng (``in_stock=False``,
+  ``stock_reason``). Khi chọn: bỏ qua món hết hàng, xét tiếp ứng viên khác đúng
+  giá trị + kiểu chân; không còn món nào thì dòng BOM thành ``out_of_stock``
+  ("Hết hàng (không có ảnh)" / "Hết hàng (giá 0₫)"): KHÔNG bỏ giỏ, KHÔNG đổi
+  sang shop khác.
 * Khớp: dùng điểm của `matcher` rồi phạt nặng khi sai kiểu chân (SMA, SOD-123,
   SOD-323, 0603, 0805…), khi BOM là IC mà kết quả là "Module"/"Kit"/"Mạch",
   và khi mã đúng nhưng thông số (điện áp…) lệch. "(50c)" = gói 50 con.
@@ -34,8 +39,8 @@ from urllib.parse import quote_plus, urljoin, urlsplit
 from ...models import BomLine
 from ...normalize import format_eng, parse
 from ..cart import (
-    ADDED, ERROR, NOT_FOUND, UNCERTAIN, CartFiller, CheckoutRefused, LineResult,
-    is_checkout_like, units_to_order,
+    ADDED, ERROR, OUT_OF_STOCK, UNCERTAIN, CartFiller, CheckoutRefused,
+    LineResult, is_checkout_like, units_to_order,
 )
 from ..matcher import (
     ACCEPT_SCORE, CONSIDER_SCORE, MARGIN, MATCH, NONE, SURE_SCORE, Candidate,
@@ -48,6 +53,7 @@ SEARCH_URL = "https://linhkien.cxtvn.com/tim-kiem.html?q={q}"
 MIN_DELAY = 2.0                       # CXT: nghỉ 2–5 giây giữa các lượt
 DEFAULT_CXT_DELAY = (2.0, 5.0)
 VARIANT_FIELDS = ("kthuoc", "color")
+MAX_OOS_RETRY = 3                     # số lần chọn lại khi trang SP báo hết hàng
 
 LOGIN_SELECTORS = ("a[href*='dang-xuat']", "a[href*='logout']")
 
@@ -69,6 +75,56 @@ class CxtCandidate(Candidate):
     pid: str = ""                                   # id sản phẩm trên CXT
     multi: bool = False                             # tên gom nhiều giá trị
     variant: Optional[tuple[str, str, str]] = None  # (trường, value, nhãn)
+    image: str = ""                                 # link ảnh trong kết quả
+    stock_reason: str = ""                          # vì sao coi là hết hàng
+
+
+# ------------------------------------------------------------ hết hàng
+
+REASON_NO_IMAGE = "không có ảnh"
+REASON_ZERO_PRICE = "giá 0₫"
+REASON_SHOP_SAYS = "shop ghi hết hàng"
+NO_IMAGE_PATH = "images/no_image.jpg"
+
+
+def oos_message(reason: str = "") -> str:
+    """'Hết hàng (không có ảnh)' / 'Hết hàng (giá 0₫)' / 'Hết hàng'."""
+    return f"Hết hàng ({reason})" if reason else "Hết hàng"
+
+
+def is_no_image(src: str) -> bool:
+    """Ảnh giữ chỗ của CXT: .../images/no_image.jpg (bỏ qua ?query)."""
+    path = urlsplit((src or "").strip()).path.lower()
+    return path == NO_IMAGE_PATH or path.endswith("/" + NO_IMAGE_PATH)
+
+
+def _img_src(n: Node) -> str:
+    for k in ("data-zoom-image", "data-src", "data-original", "src"):
+        v = n.get(k).strip()
+        if v:
+            return v
+    return ""
+
+
+def _card_image(card: Node) -> str:
+    """Ảnh của một kết quả tìm kiếm: <img> trong .imgitem_lkpa."""
+    box = card.find(lambda n: _has_class(n, "imgitem_lkpa"))
+    if box is None:
+        return ""
+    img = box if box.tag == "img" else box.find(lambda n: n.tag == "img")
+    return _img_src(img) if img is not None else ""
+
+
+def _stock_of(price: int, image: str, shop_says_out: bool,
+              no_image_out_of_stock: bool) -> tuple[Optional[bool], str]:
+    """(in_stock, stock_reason) của một món theo ảnh / giá / chữ trên trang."""
+    if no_image_out_of_stock and image and is_no_image(image):
+        return False, REASON_NO_IMAGE
+    if price <= 0:
+        return False, REASON_ZERO_PRICE
+    if shop_says_out:
+        return False, REASON_SHOP_SAYS
+    return None, ""
 
 
 _ID_RE = re.compile(r"(?:^|/)(\d+)-[^/?#]*\.html", re.I)
@@ -88,9 +144,14 @@ def _has_class(n: Node, name: str) -> bool:
     return name.lower() in n.classes
 
 
-def parse_cxt_search(html: str, base_url: str = SEARCH_URL
+def parse_cxt_search(html: str, base_url: str = SEARCH_URL, *,
+                     no_image_out_of_stock: bool = False
                      ) -> tuple[list[CxtCandidate], list[CxtCandidate]]:
-    """Đọc trang tìm kiếm CXT -> (ứng viên có giá, món giá 0₫ cần kiểm tra)."""
+    """Đọc trang tìm kiếm CXT -> (ứng viên có giá, món giá 0₫).
+
+    Món giá 0₫ luôn bị đánh dấu hết hàng; món có ảnh ``images/no_image.jpg``
+    bị đánh dấu hết hàng khi `no_image_out_of_stock` (shops.json) bật.
+    """
     root = parse_html(html)
     priced: list[CxtCandidate] = []
     zero: list[CxtCandidate] = []
@@ -115,13 +176,17 @@ def parse_cxt_search(html: str, base_url: str = SEARCH_URL
         text = _fold(card.text())
         m = _RETAIL_RE.search(text)
         price = parse_price(m.group(1)) if m else 0     # không ghi giá = 0₫
-        stock: Optional[bool] = None
-        if any(k in text for k in ("het hang", "tam het", "ngung kinh doanh")):
-            stock = False
+        image = _card_image(card)
+        stock, why = _stock_of(
+            price, image,
+            any(k in text for k in ("het hang", "tam het", "ngung kinh doanh")),
+            no_image_out_of_stock)
         c = CxtCandidate(title=title, url=url, price=price, in_stock=stock,
                          pack=detect_cxt_pack(title),
                          pid=_ID_RE.search(href).group(1),
-                         multi=is_multi_value(title))
+                         multi=is_multi_value(title),
+                         image=urljoin(base_url, image) if image else "",
+                         stock_reason=why)
         (priced if price > 0 else zero).append(c)
     return priced, zero
 
@@ -310,38 +375,67 @@ def cxt_pick(line: BomLine, cands: list[CxtCandidate],
              zeros: list[CxtCandidate] = (), *, accept: float = ACCEPT_SCORE,
              consider: float = CONSIDER_SCORE, margin: float = MARGIN
              ) -> tuple[MatchDecision, list[CxtCandidate]]:
-    """Như `pick_best` nhưng dùng `cxt_score`.
+    """Như `pick_best` nhưng dùng `cxt_score`, và bỏ qua món hết hàng.
+
+    Món hết hàng (giá 0₫, không có ảnh, shop ghi hết hàng) không bao giờ được
+    chọn; các ứng viên còn hàng khác đúng giá trị + kiểu chân vẫn được xét.
+    Không còn ứng viên còn hàng nào khớp mà món hết hàng khớp chắc -> status
+    ``out_of_stock`` với lời nhắn "Hết hàng (<lý do>)".
 
     Trả thêm `group`: ứng viên tốt nhất cùng các sản phẩm TRÙNG TÊN với nó —
     cần vào trang sản phẩm để phân biệt (nếu nhiều hơn một).
     """
+    for z in zeros:                        # món giá 0₫ luôn coi là hết hàng
+        if z.in_stock is not False:
+            z.in_stock = False
+        if not getattr(z, "stock_reason", ""):
+            z.stock_reason = REASON_ZERO_PRICE
     for c in [*cands, *zeros]:
         cxt_score(line, c)
-    ranked = sorted(cands, key=lambda c: -c.score)
-    zero_hits = sorted((z for z in zeros if z.score >= consider),
-                       key=lambda c: -c.score)
+    ranked = sorted((c for c in cands if not _is_oos(c)), key=lambda c: -c.score)
+    oos = sorted((c for c in [*cands, *zeros] if _is_oos(c)),
+                 key=lambda c: -c.score)
 
+    dec, group = _pick_available(ranked, accept=accept, consider=consider,
+                                 margin=margin)
+    if dec.status == MATCH:
+        return dec, group
+
+    good_oos = [c for c in oos if c.score >= accept]
+    if good_oos and (dec.best is None or good_oos[0].score > dec.best.score):
+        top = good_oos[0]
+        return MatchDecision(OUT_OF_STOCK, top, good_oos,
+                             oos_message(getattr(top, "stock_reason", ""))), []
+    weak_oos = [c for c in oos if c.score >= consider]
+    if dec.status == NONE and weak_oos:
+        top = weak_oos[0]
+        names = "; ".join(z.title for z in weak_oos[:3])
+        why = oos_message(getattr(top, "stock_reason", "")).lower()
+        return MatchDecision(M_UNCERTAIN, top, weak_oos,
+                             f"khớp chưa đủ chắc, món gần giống đã {why} — "
+                             f"cần kiểm tra: {names}"), []
+    return dec, []
+
+
+def _is_oos(c: Candidate) -> bool:
+    return c.in_stock is False
+
+
+def _pick_available(ranked: list[CxtCandidate], *, accept: float,
+                    consider: float, margin: float
+                    ) -> tuple[MatchDecision, list[CxtCandidate]]:
+    """Chọn trong các ứng viên CÒN HÀNG (đã chấm điểm, sắp giảm dần)."""
     if not ranked or ranked[0].score < consider:
-        if zero_hits:
-            names = "; ".join(z.title for z in zero_hits[:3])
-            return MatchDecision(M_UNCERTAIN, zero_hits[0], zero_hits,
-                                 f"chỉ thấy sản phẩm giá 0₫, cần kiểm tra: "
-                                 f"{names}"), []
         return MatchDecision(NONE, None, ranked, "không có sản phẩm nào khớp"), []
-
     good = [c for c in ranked if c.score >= accept]
-    available = [c for c in good if c.in_stock is not False]
-    if good and not available:
-        return MatchDecision(NONE, good[0], ranked,
-                             "có sản phẩm khớp nhưng đã hết hàng"), []
-    if not available:
+    if not good:
         return MatchDecision(M_UNCERTAIN, ranked[0], ranked,
                              f"khớp chưa đủ chắc ({ranked[0].score:.2f}): "
                              f"{ranked[0].reason}"), []
 
-    best = available[0]
-    group = [best] + [c for c in available[1:] if _same_name(c.title, best.title)]
-    others = [c for c in available[1:] if c not in group]
+    best = good[0]
+    group = [best] + [c for c in good[1:] if _same_name(c.title, best.title)]
+    others = [c for c in good[1:] if c not in group]
     if others and best.score - others[0].score < margin and best.score < SURE_SCORE:
         return MatchDecision(M_UNCERTAIN, best, ranked,
                              "nhiều sản phẩm khớp ngang nhau, cần chọn tay"), []
@@ -364,6 +458,9 @@ class CxtProduct:
     added: bool = False                   # nút đã đổi sang "ĐÃ THÊM"
     in_stock: Optional[bool] = None
     spec_text: str = ""
+    image: str = ""                       # ảnh chính của sản phẩm
+    retail: Optional[int] = None          # giá "Bán lẻ" (None = không ghi)
+    stock_reason: str = ""
 
     def price_for(self, units: int) -> int:
         """Đơn giá theo bậc ứng với số lượng `units` (0 nếu không có bảng)."""
@@ -473,7 +570,67 @@ def _is_add_label(text: str) -> bool:
     return "cho vao gio" in t or "them vao gio" in t
 
 
-def parse_cxt_product(html: str) -> CxtProduct:
+# Khối không thuộc sản phẩm chính: thẻ kết quả/sản phẩm liên quan, đầu/chân trang.
+_NOT_MAIN_RE = re.compile(
+    r"item_lkpa|imgitem_lkpa|header|footer|menu|logo|banner|sidebar|"
+    r"lienquan|lien_quan|related|cungloai|cung_loai|splq|sp_khac|other")
+_MAIN_IMG_RE = re.compile(
+    r"zoom|main|detail|chitiet|chi_tiet|big|large|anhchinh|anh_chinh|"
+    r"img_?sp|imgsp|product|sanpham|san_pham|photo|gallery")
+
+
+def _names(n: Node) -> str:
+    return " ".join(n.classes + [n.id])
+
+
+def _main_image(root: Node) -> str:
+    """Ảnh chính trên trang sản phẩm (bỏ ảnh logo, ảnh sản phẩm liên quan)."""
+    imgs: list[tuple[str, list[Node]]] = []
+    for n in root.iter():
+        if n.tag != "img":
+            continue
+        chain = [n, *n.ancestors()]
+        if any(a.tag in ("header", "footer", "nav")
+               or _NOT_MAIN_RE.search(_names(a)) for a in chain):
+            continue
+        src = _img_src(n)
+        if not src or "logo" in src.lower():
+            continue
+        imgs.append((src, chain))
+    for src, chain in imgs:
+        if any(_MAIN_IMG_RE.search(_names(a)) for a in chain):
+            return src
+    if imgs:
+        return imgs[0][0]
+    og = root.find(lambda n: n.tag == "meta"
+                   and n.get("property").lower() == "og:image")
+    return og.get("content").strip() if og is not None else ""
+
+
+def _main_text(root: Node) -> str:
+    """Chữ của trang, bỏ các khối sản phẩm liên quan/đầu/chân trang."""
+    parts: list[str] = []
+
+    def walk(n: Node) -> None:
+        for c in n.children:
+            if isinstance(c, str):
+                parts.append(c)
+            elif c.tag not in ("script", "style", "header", "footer", "nav") \
+                    and not _NOT_MAIN_RE.search(_names(c)):
+                walk(c)
+
+    walk(root)
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def parse_cxt_product(html: str, *, no_image_out_of_stock: bool = False
+                      ) -> CxtProduct:
+    """Đọc trang sản phẩm CXT.
+
+    Hết hàng (``in_stock=False`` + ``stock_reason``) khi: ảnh chính là
+    ``images/no_image.jpg`` (chỉ khi `no_image_out_of_stock`), giá bán lẻ 0₫
+    mà không có bậc giá nào > 0, hoặc trang ghi hết hàng.
+    """
     root = parse_html(html)
     info = CxtProduct()
     h1 = root.find(lambda n: n.tag == "h1")
@@ -516,8 +673,19 @@ def parse_cxt_product(html: str) -> CxtProduct:
     info.spec_text = " ".join(parts)
 
     body = _fold(root.text())
-    if any(k in body for k in ("het hang", "tam het hang", "ngung kinh doanh")):
-        info.in_stock = False
+    shop_says_out = any(k in body for k in ("het hang", "tam het hang",
+                                            "ngung kinh doanh"))
+    info.image = _main_image(root)
+    m = _RETAIL_RE.search(_fold(_main_text(root)))
+    if m:
+        info.retail = parse_price(m.group(1))
+    # Giá 0₫: ghi "Bán lẻ: 0₫" và không có bậc giá nào > 0.
+    price = info.retail if info.retail is not None else 1
+    if info.tiers:
+        price = max(p for _, p in info.tiers)
+    stock, why = _stock_of(price, info.image, shop_says_out, no_image_out_of_stock)
+    if stock is False:
+        info.in_stock, info.stock_reason = False, why
     return info
 
 
@@ -556,6 +724,25 @@ def _onclick_forbidden(attrs: str) -> bool:
     return "checkout" in a or is_checkout_like(a)
 
 
+def cxt_no_image_flag(shops: Any = None) -> bool:
+    """"no_image_means_out_of_stock" của shop CXT trong data/shops.json.
+
+    Khớp shop theo tên miền *.cxtvn.com (cxtvn.com hay linhkien.cxtvn.com đều
+    là CXT). Không có cấu hình -> False.
+    """
+    if shops is None:
+        try:
+            from ...config import load_shops
+            shops = load_shops()
+        except Exception:
+            return False
+    items = shops.values() if isinstance(shops, dict) else shops
+    for s in items:
+        if is_cxt_url(getattr(s, "url", "")):
+            return bool(getattr(s, "no_image_means_out_of_stock", False))
+    return False
+
+
 class CxtCartFiller(CartFiller):
     """CartFiller cho CXT. Được `CartFiller(...)` tự chọn khi link là *.cxtvn.com."""
 
@@ -565,8 +752,13 @@ class CxtCartFiller(CartFiller):
         lo, hi = kwargs.pop("delay", DEFAULT_CXT_DELAY)
         lo = max(MIN_DELAY, lo)
         kwargs["delay"] = (lo, max(lo, hi))
+        if kwargs.get("no_image_out_of_stock") is None:
+            kwargs["no_image_out_of_stock"] = cxt_no_image_flag()
         super().__init__(page, base_url, search_url=SEARCH_URL, **kwargs)
         self.logged_out = False
+        # link sản phẩm -> lý do hết hàng, biết được khi vào trang sản phẩm
+        self.known_oos: dict[str, str] = {}
+        self._page_oos = False            # add_to_cart vừa gặp trang hết hàng
 
     # -- tiện ích
 
@@ -618,21 +810,38 @@ class CxtCartFiller(CartFiller):
     def search_cxt(self, query: str) -> tuple[list[CxtCandidate], list[CxtCandidate]]:
         url = self.search_page_url(query)
         html = self._goto(url)
-        return parse_cxt_search(html, getattr(self.page, "url", "") or url)
+        priced, zeros = parse_cxt_search(
+            html, getattr(self.page, "url", "") or url,
+            no_image_out_of_stock=self.no_image_out_of_stock)
+        for c in priced:                  # đã biết hết hàng qua trang sản phẩm
+            if c.url in self.known_oos:
+                c.in_stock, c.stock_reason = False, self.known_oos[c.url]
+        return priced, zeros
 
     def search(self, query: str) -> list[Candidate]:
-        return list(self.search_cxt(query)[0])
+        return [c for c in self.search_cxt(query)[0] if c.in_stock is not False]
+
+    def _mark_oos(self, c: CxtCandidate, reason: str) -> None:
+        c.in_stock, c.stock_reason = False, reason
+        self.known_oos[c.url] = reason
 
     def find(self, line: BomLine) -> tuple[MatchDecision, str]:
         best: tuple[MatchDecision, str] | None = None
         for q in search_queries(line):
             cands, zeros = self.search_cxt(q)
-            dec, group = cxt_pick(line, cands, zeros, accept=self.accept,
-                                  consider=self.consider)
-            if dec.status == MATCH:
+            while True:
+                dec, group = cxt_pick(line, cands, zeros, accept=self.accept,
+                                      consider=self.consider)
+                if dec.status != MATCH:
+                    break
+                n_oos = len(self.known_oos)
                 dec = self._resolve(line, dec, group)
-                if dec.status == MATCH:
-                    return dec, q
+                # Cả nhóm hết hàng (biết qua trang sản phẩm): chọn lại từ đầu,
+                # các món đó giờ đã bị đánh dấu nên không bị chọn nữa.
+                if dec.status != OUT_OF_STOCK or len(self.known_oos) == n_oos:
+                    break
+            if dec.status == MATCH:
+                return dec, q
             if best is None or (best[0].status == NONE and dec.status != NONE) or (
                     dec.best and best[0].best
                     and dec.best.score > best[0].best.score):
@@ -649,10 +858,16 @@ class CxtCartFiller(CartFiller):
         want = spec_values(_line_text(line))
         hits: list[CxtCandidate] = []
         notes: list[str] = []
+        oos: list[CxtCandidate] = []
         for i, c in enumerate(group):
             if i:
                 self._pause()
-            info = parse_cxt_product(self._goto(c.url))
+            info = parse_cxt_product(
+                self._goto(c.url), no_image_out_of_stock=self.no_image_out_of_stock)
+            if info.in_stock is False:
+                self._mark_oos(c, info.stock_reason)
+                oos.append(c)
+                continue
             if info.variants:
                 v, why = choose_variant(line, info.variants)
                 if v:
@@ -668,6 +883,9 @@ class CxtCartFiller(CartFiller):
             extra = f"; chọn biến thể {c.variant[0]}={c.variant[2]}" if c.variant \
                 else "; phân biệt qua trang sản phẩm"
             return MatchDecision(MATCH, c, dec.ranked, f"{c.reason}{extra}")
+        if oos and len(oos) == len(group):
+            return MatchDecision(OUT_OF_STOCK, oos[0], oos,
+                                 oos_message(oos[0].stock_reason))
         if len(group) > 1:
             msg = (f"{len(group)} sản phẩm trùng tên '{best.title}', "
                    f"không chắc chọn cái nào")
@@ -724,14 +942,21 @@ class CxtCartFiller(CartFiller):
         if self.logged_out:
             return LineResult(line, ERROR, cand, message="chưa đăng nhập CXT")
         html = self._goto(cand.url)
-        info = parse_cxt_product(html)
+        info = parse_cxt_product(html, no_image_out_of_stock=self.no_image_out_of_stock)
+        if info.in_stock is False:
+            # Kể cả khi trang vẫn có nút CHO VÀO GIỎ: không bấm.
+            if isinstance(cand, CxtCandidate):
+                self._mark_oos(cand, info.stock_reason)
+            else:
+                self.known_oos[cand.url] = info.stock_reason
+            self._page_oos = True
+            return LineResult(line, OUT_OF_STOCK, cand, candidates=[cand],
+                              message=oos_message(info.stock_reason))
         if info.logged_in is False:
             self.logged_out = True
             return LineResult(line, ERROR, cand, candidates=[cand],
                               message="chưa đăng nhập CXT (nút CHO VÀO GIỎ trỏ "
                                       "tới dang-nhap.html) — đăng nhập rồi chạy lại")
-        if info.in_stock is False:
-            return LineResult(line, NOT_FOUND, cand, message="sản phẩm đã hết hàng")
 
         notes: list[str] = []
         if info.variants:
@@ -785,12 +1010,23 @@ class CxtCartFiller(CartFiller):
     def add_line(self, line: BomLine) -> LineResult:
         if self.logged_out:
             return LineResult(line, ERROR, message="chưa đăng nhập CXT")
-        return super().add_line(line)
+        self._page_oos = False
+        res = super().add_line(line)
+        # Trang sản phẩm cho thấy món đã chọn hết hàng: tìm lại (món đó giờ bị
+        # đánh dấu) để xét ứng viên khác đúng giá trị + kiểu chân.
+        for _ in range(MAX_OOS_RETRY):
+            if not (res.status == OUT_OF_STOCK and self._page_oos):
+                break
+            self._page_oos = False
+            self._pause()
+            res = super().add_line(line)
+        return res
 
 
 __all__ = [
     "SEARCH_URL", "LOGIN_SELECTORS", "CxtCandidate", "CxtProduct",
-    "CxtCartFiller", "choose_variant", "cxt_pick", "cxt_score",
+    "CxtCartFiller", "choose_variant", "cxt_no_image_flag", "cxt_pick",
+    "cxt_score", "is_no_image", "oos_message",
     "detect_cxt_pack", "is_cxt_url", "is_multi_value", "packages",
     "parse_cxt_product", "parse_cxt_search", "spec_values",
 ]

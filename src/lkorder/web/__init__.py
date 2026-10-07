@@ -85,6 +85,7 @@ def shop_json(s: Shop) -> dict:
         "shipping_fee": s.shipping_fee, "free_ship_threshold": s.free_ship_threshold,
         "order_penalty": s.order_penalty, "prep_days": s.prep_days,
         "enabled": s.enabled, "note": s.note,
+        "no_image_means_out_of_stock": s.no_image_means_out_of_stock,
     }
 
 
@@ -94,6 +95,7 @@ def shop_json(s: Shop) -> dict:
 GROUP_OF = {
     "added": "added",           # đã thêm vào giỏ
     "not_found": "not_found",   # không thấy
+    "out_of_stock": "out_of_stock",   # hết hàng: không bỏ giỏ, không đổi shop
     "uncertain": "check",       # cần kiểm tra
     "error": "check",
 }
@@ -197,7 +199,7 @@ class CartJob:
     def to_json(self) -> dict:
         with self._lock:
             items = [dict(it) for it in self.items]
-            counts = {"added": 0, "not_found": 0, "check": 0}
+            counts = {"added": 0, "not_found": 0, "out_of_stock": 0, "check": 0}
             done = 0
             for it in items:
                 if it["status"] not in ("pending", "running"):
@@ -231,7 +233,7 @@ def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
     KHÔNG thanh toán — CartFiller từ chối mọi nút kiểu "thanh toán".
     """
     from ..browser import BrowserSession
-    from ..browser.cart import DEFAULT_DELAY, CartFiller
+    from ..browser.cart import DEFAULT_DELAY, CartFiller, shop_option
 
     base = shop_base_url(shop_url)
     host = _host(base)
@@ -241,7 +243,10 @@ def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
     with BrowserSession() as session:
         page = session.open_shop(shop_url, notify=job.log)
         job.log("Đã vào shop, bắt đầu tìm từng linh kiện.")
-        filler = CartFiller(page, base, platform=platform)
+        filler = CartFiller(page, base, platform=platform,
+                            no_image_out_of_stock=shop_option(
+                                base, "no_image_means_out_of_stock", shops,
+                                default=None))
         for i, line in enumerate(lines):
             if job.cancelled:
                 return
@@ -452,6 +457,8 @@ class App:
                 prep_days=max(0, int(it.get("prep_days") or 0)),
                 enabled=bool(it.get("enabled", True)),
                 note=str(it.get("note") or ""),
+                no_image_means_out_of_stock=bool(
+                    it.get("no_image_means_out_of_stock", False)),
             )
         if not shops:
             return {"error": "Phải có ít nhất một shop."}

@@ -82,6 +82,7 @@
       "order_penalty": 20000,
       "prep_days": 2,
       "enabled": true,
+      "no_image_means_out_of_stock": true,
       "note": "cxtvn.com. Thêm giỏ dùng bộ xử lý riêng (browser/shops/cxtvn.py). Kiểm tra lại phí ship thực tế."
     }
   ]

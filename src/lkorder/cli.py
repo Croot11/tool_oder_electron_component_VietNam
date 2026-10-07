@@ -234,8 +234,9 @@ def run_cart(page, lines: list, base_url: str, *, dry_run: bool = False,
                     units * max(1, dec.best.pack), [dec.best], q,
                     f"khớp điểm {dec.best.score:.2f}")
             else:
-                status = cart_mod.NOT_FOUND if dec.status == NONE \
-                    else cart_mod.UNCERTAIN
+                status = {NONE: cart_mod.NOT_FOUND,
+                          cart_mod.OUT_OF_STOCK: cart_mod.OUT_OF_STOCK
+                          }.get(dec.status, cart_mod.UNCERTAIN)
                 res = cart_mod.LineResult(line, status, dec.best,
                                           candidates=dec.shortlist, query=q,
                                           message=dec.message)

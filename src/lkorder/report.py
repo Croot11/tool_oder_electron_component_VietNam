@@ -228,8 +228,9 @@ def to_markdown(sol: Solution) -> str:
 # không cần import module trình duyệt.
 
 CART_MATCHED = "matched"     # --dry-run: đã khớp, lẽ ra sẽ bỏ giỏ
+CART_OUT_OF_STOCK = "out_of_stock"   # = browser.cart.OUT_OF_STOCK
 
-_CART_GROUPS = ("added", "not_found", "check")
+_CART_GROUPS = ("added", "not_found", "out_of_stock", "check")
 
 
 def _cart_group(status: str) -> str:
@@ -237,6 +238,8 @@ def _cart_group(status: str) -> str:
         return "added"
     if status == "not_found":
         return "not_found"
+    if status == CART_OUT_OF_STOCK:
+        return "out_of_stock"
     return "check"            # uncertain, error, hoặc trạng thái lạ
 
 
@@ -245,6 +248,7 @@ def _cart_titles(dry_run: bool) -> dict[str, str]:
         "added": "KHỚP — SẼ THÊM VÀO GIỎ (dry-run, chưa bấm)" if dry_run
                  else "ĐÃ THÊM VÀO GIỎ",
         "not_found": "KHÔNG THẤY TRÊN SHOP",
+        "out_of_stock": "HẾT HÀNG (không thêm giỏ, không đổi shop)",
         "check": "CẦN KIỂM TRA BẰNG MẮT",
     }
 
@@ -271,13 +275,21 @@ def _status_label(r) -> str:
     return {"uncertain": "chưa chắc", "error": "lỗi"}.get(r.status, r.status)
 
 
+def _oos_note(r) -> str:
+    """' — Hết hàng (không có ảnh): <tên sản phẩm trên shop>'."""
+    note = r.message or "Hết hàng"
+    if r.product is not None and getattr(r.product, "title", ""):
+        note += f": {trunc(r.product.title, 50)}"
+    return f" — {note}"
+
+
 def cart_counts(results: Sequence) -> dict[str, int]:
     return {g: len(v) for g, v in group_cart_results(results).items()}
 
 
 def render_cart(results: Sequence, shop_url: str = "",
                 dry_run: bool = False) -> str:
-    """Báo cáo cho terminal: đã thêm / không thấy / cần kiểm tra."""
+    """Báo cáo cho terminal: đã thêm / không thấy / hết hàng / cần kiểm tra."""
     if not results:
         return "BOM không có dòng nào."
     groups = group_cart_results(results)
@@ -305,6 +317,12 @@ def render_cart(results: Sequence, shop_url: str = "",
             parts.append(f"   • {_need(r)}{note}")
         parts.append("")
 
+    if groups["out_of_stock"]:
+        parts.append(f"⊘ {titles['out_of_stock']} ({len(groups['out_of_stock'])})")
+        for r in groups["out_of_stock"]:
+            parts.append(f"   • {_need(r)}{_oos_note(r)}")
+        parts.append("")
+
     if groups["check"]:
         parts.append(f"? {titles['check']} ({len(groups['check'])})")
         for r in groups["check"]:
@@ -322,7 +340,8 @@ def render_cart(results: Sequence, shop_url: str = "",
     parts.append("═" * 62)
     verb = "Khớp" if dry_run else "Đã thêm"
     parts.append(f"{verb} {n['added']}/{len(results)}  ·  "
-                 f"Không thấy {n['not_found']}  ·  Cần kiểm tra {n['check']}")
+                 f"Không thấy {n['not_found']}  ·  Hết hàng {n['out_of_stock']}  ·  "
+                 f"Cần kiểm tra {n['check']}")
     if dry_run:
         parts.append("(--dry-run: chưa bấm thêm vào giỏ)")
     else:
@@ -342,7 +361,8 @@ def cart_to_markdown(results: Sequence, shop_url: str = "",
         out.append("")
     verb = "Khớp" if dry_run else "Đã thêm"
     out.append(f"**{verb} {n['added']}/{len(results)}** · Không thấy "
-               f"{n['not_found']} · Cần kiểm tra {n['check']}")
+               f"{n['not_found']} · Hết hàng {n['out_of_stock']} · "
+               f"Cần kiểm tra {n['check']}")
     out.append("")
 
     def esc(s: str) -> str:
@@ -365,6 +385,14 @@ def cart_to_markdown(results: Sequence, shop_url: str = "",
         out += [f"## {titles['not_found']}", ""]
         for r in groups["not_found"]:
             out.append(f"- {_need(r)}" + (f" — {r.message}" if r.message else ""))
+        out.append("")
+    if groups["out_of_stock"]:
+        out += [f"## {titles['out_of_stock']}", "",
+                "| Cần | Số lượng cần | Sản phẩm ở shop | Lý do |",
+                "|---|---:|---|---|"]
+        for r in groups["out_of_stock"]:
+            out.append(f"| {esc(r.line.raw or r.line.key)} | {r.line.qty} | "
+                       f"{link(r.product)} | {esc(r.message or 'Hết hàng')} |")
         out.append("")
     if groups["check"]:
         out += [f"## {titles['check']}", ""]

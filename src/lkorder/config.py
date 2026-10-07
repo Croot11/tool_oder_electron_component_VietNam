@@ -56,6 +56,8 @@ def load_shops(path: str | Path | None = None) -> dict[str, Shop]:
             prep_days=int(it.get("prep_days", 2)),
             enabled=bool(it.get("enabled", True)),
             note=it.get("note", ""),
+            no_image_means_out_of_stock=bool(
+                it.get("no_image_means_out_of_stock", False)),
         )
     return shops
 
@@ -76,6 +78,8 @@ def save_shops(shops: dict[str, Shop], path: str | Path | None = None) -> Path:
                 "prep_days": s.prep_days,
                 "enabled": s.enabled,
                 "note": s.note,
+                **({"no_image_means_out_of_stock": True}
+                   if s.no_image_means_out_of_stock else {}),
             }
             for s in shops.values()
         ]

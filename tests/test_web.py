@@ -174,7 +174,8 @@ class TestCartJob(WebBase):
         self.assertEqual(j["status"], "done")
         self.assertEqual(j["total"], 3)
         self.assertEqual(j["done"], 3)
-        self.assertEqual(j["counts"], {"added": 1, "not_found": 1, "check": 1})
+        self.assertEqual(j["counts"], {"added": 1, "not_found": 1,
+                                       "out_of_stock": 0, "check": 1})
         first = j["items"][0]
         self.assertEqual(first["status"], "added")
         self.assertEqual(first["title"], "IC NE555P DIP-8")

@@ -264,9 +264,8 @@ class TestMatch(unittest.TestCase):
 
     def test_chi_co_gia_0(self):
         dec, _ = self.pick("LM2596S-ADJ x1")
-        self.assertEqual(dec.status, UNCERTAIN)
-        self.assertIn("0₫", dec.message)
-        self.assertIn("kiểm tra", dec.message)
+        self.assertEqual(dec.status, C.OUT_OF_STOCK)
+        self.assertEqual(dec.message, "Hết hàng (giá 0₫)")
 
     def test_khong_co(self):
         dec, _ = self.pick("STM32F103C8T6 x1")

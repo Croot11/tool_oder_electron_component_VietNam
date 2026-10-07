@@ -130,6 +130,7 @@
     white-space:nowrap;border:1px solid currentColor}
   .st.added{color:var(--ok)} .st.not_found{color:var(--bad)}
   .st.uncertain,.st.error,.st.skipped{color:var(--warn)}
+  .st.out_of_stock{color:var(--cta)}
   .st.pending{color:var(--muted)} .st.running{color:var(--accent)}
   .groups{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
   .groups button{flex:1;min-width:140px;text-align:left;background:var(--panel);
@@ -291,9 +292,9 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 /* ---------- bỏ vào giỏ ---------- */
 const CART = {text:'', name:'', jobId:'', timer:null, filter:'all', last:null};
 const ST_LABEL = {pending:'chờ', running:'đang tìm…', added:'đã thêm',
-  not_found:'không thấy', uncertain:'cần kiểm tra', error:'lỗi', skipped:'bỏ qua'};
+  not_found:'không thấy', out_of_stock:'hết hàng', uncertain:'cần kiểm tra', error:'lỗi', skipped:'bỏ qua'};
 const GROUPS = [['added','Đã thêm vào giỏ'],['not_found','Không thấy'],
-  ['check','Cần kiểm tra']];
+  ['out_of_stock','Hết hàng'],['check','Cần kiểm tra']];
 
 const shopUrl = $('#shopurl');
 shopUrl.value = localStorage.getItem('lk.shopurl') || '';
@@ -400,7 +401,7 @@ function renderJob(j){
     const prod = it.title
       ? (it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title))
       : '';
-    const cands = (it.status !== 'added' && it.candidates && it.candidates.length)
+    const cands = (it.status !== 'added' && it.status !== 'out_of_stock' && it.candidates && it.candidates.length)
       ? '<div class="sub">Gần giống: ' + it.candidates.map(c =>
           `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title)}</a> (${c.score})`).join(' · ') + '</div>'
       : '';

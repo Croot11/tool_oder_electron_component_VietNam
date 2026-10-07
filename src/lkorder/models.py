@@ -38,6 +38,8 @@ class Shop:
     prep_days: int = 2
     enabled: bool = True
     note: str = ""
+    # Sản phẩm không có ảnh (images/no_image.jpg) = hết hàng (CXT).
+    no_image_means_out_of_stock: bool = False
 
     def ship_cost(self, subtotal: int) -> int:
         if self.free_ship_threshold and subtotal >= self.free_ship_threshold:
