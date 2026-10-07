@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><title>Giỏ hàng</title></head>
+<body>
+<header>
+  <a href="/" class="logo">Shop linh kiện</a>
+  <a href="/cart" class="header-cart"><span class="cart-count">2</span></a>
+</header>
+<main>
+  <h1>Giỏ hàng của bạn</h1>
+  <form action="/cart" method="post" id="cartform">
+    <table class="cart-table">
+      <thead><tr><th>Sản phẩm</th><th>Số lượng</th><th>Thành tiền</th><th></th></tr></thead>
+      <tbody>
+        <tr class="cart-item">
+          <td><img src="/i/ne555.jpg" alt="NE555"><a href="/products/ic-ne555p-dip-8">IC NE555P DIP-8</a></td>
+          <td><input type="number" name="updates[]" class="qty" value="10" min="1"></td>
+          <td>35.000₫</td>
+          <td><a href="/cart/change?line=1&amp;quantity=0" class="cart__remove">Xoá</a></td>
+        </tr>
+        <tr class="cart-item">
+          <td><img src="/i/dt.jpg" alt=""><a href="/products/dien-tro-10k-1-4w">Điện trở 10K 1/4W (gói 100 con)</a></td>
+          <td><input type="number" name="updates[]" class="qty" value="3" min="1"></td>
+          <td>37.500₫</td>
+          <td><a href="/cart/change?line=2&amp;quantity=0" class="cart__remove">×</a></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="cart-actions">
+      <a href="/collections/all" class="btn-continue">Tiếp tục mua hàng</a>
+      <button type="button" class="btn-clear" id="clear-cart">Xoá tất cả</button>
+      <button type="submit" name="update" class="btn-update">Cập nhật giỏ hàng</button>
+      <button type="submit" name="checkout" class="btn-checkout">Thanh toán</button>
+      <a href="/checkout" class="btn-buy-now">Mua ngay</a>
+    </div>
+  </form>
+</main>
+</body>
+</html>

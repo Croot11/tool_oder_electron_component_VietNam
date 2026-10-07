@@ -72,6 +72,7 @@ from ..matcher import (
 from ..matcher import UNCERTAIN as M_UNCERTAIN
 
 SEARCH_URL = "https://linhkien.cxtvn.com/tim-kiem.html?q={q}"
+CART_URL = "https://cxtvn.com/gio-hang.html"
 MIN_DELAY = 2.0                       # CXT: nghỉ 2–5 giây giữa các lượt
 DEFAULT_CXT_DELAY = (2.0, 5.0)
 VARIANT_FIELDS = ("kthuoc", "color")
@@ -1071,6 +1072,7 @@ class CxtCartFiller(CartFiller):
     def __init__(self, page: Any, base_url: str, **kwargs: Any) -> None:
         kwargs.pop("search_url", None)
         kwargs.pop("platform", None)
+        kwargs.setdefault("cart_url", CART_URL)
         lo, hi = kwargs.pop("delay", DEFAULT_CXT_DELAY)
         lo = max(MIN_DELAY, lo)
         kwargs["delay"] = (lo, max(lo, hi))
@@ -1378,22 +1380,31 @@ class CxtCartFiller(CartFiller):
             raise CheckoutRefused(f"Từ chối bấm: {text!r}")
         h.click()
 
+    def _count_of(self, html: str) -> Optional[int]:
+        """Số trên biểu tượng giỏ của CXT (.slcart)."""
+        n = parse_cxt_product(html).cart_count
+        return n if n is not None else super()._count_of(html)
+
     def _wait_added_cxt(self, before: Optional[int], button: Any) -> tuple[bool, str]:
+        self._sync_floor(before)
         deadline = self.clock() + self.confirm_timeout
         while True:
             info = parse_cxt_product(self.page.content())
             after = info.cart_count
-            if before is not None and after is not None and after > before:
-                return True, f"giỏ tăng {before} -> {after}"
-            if before is None and after is not None and after > 0:
-                return True, f"giỏ có {after} món"
+            # before=None: lấy số đọc ở bước kiểm tra giỏ làm mốc; không có mốc
+            # thì chỉ tin vào nút 'ĐÃ THÊM' (không tin 'giỏ có N món').
+            why = self._count_confirms(before, after)
+            if why:
+                return True, why
             try:
                 label = button.inner_text() or ""
             except Exception:
                 label = ""
             if "da them" in _fold(label) or info.added:
+                self._note_cart(after, True)
                 return True, "nút đổi sang 'ĐÃ THÊM'"
             if self.clock() >= deadline:
+                self._note_cart(after, False)
                 return False, "bấm CHO VÀO GIỎ nhưng không thấy giỏ tăng"
             self.sleep(self.poll)
 
@@ -1540,7 +1551,7 @@ class CxtCartFiller(CartFiller):
 
 
 __all__ = [
-    "SEARCH_URL", "LOGIN_SELECTORS", "CxtCandidate", "CxtProduct",
+    "SEARCH_URL", "CART_URL", "LOGIN_SELECTORS", "CxtCandidate", "CxtProduct",
     "CxtCartFiller", "choose_variant", "cxt_no_image_flag", "cxt_pick",
     "cxt_score", "has_login_redirect", "is_add_to_cart_onclick",
     "is_logged_in", "is_no_image", "oos_message", "LOGIN_COOKIES", "LOGIN_SIGNS",

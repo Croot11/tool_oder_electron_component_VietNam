@@ -39,6 +39,13 @@ from ..optimizer import Options, compare_scenarios, solve
 HERE = Path(__file__).resolve().parent
 PKG_ROOT = HERE.parent          # src/lkorder — nơi chứa các file .py đang chạy
 
+# Lượt chạy tạm dừng chờ người dùng quyết định khi giỏ shop đã có đồ.
+WAITING_CART = "waiting_cart_decision"
+CART_CHOICES = ("keep", "clear", "cancel")
+CART_DECISION_TIMEOUT = 300.0     # giây; quá hạn coi như 'cancel'
+PHASE_CHECKING = "checking_cart"
+PHASE_CLEARING = "clearing_cart"
+
 
 # ------------------------------------------------- phiên bản code đang chạy
 
@@ -260,7 +267,8 @@ class CartJob:
         self.lines = lines
         self.shop_url = shop_url
         self.filename = filename
-        self.status = "running"          # running / done / cancelled / error
+        # running / waiting_cart_decision / done / cancelled / error
+        self.status = "running"
         self.error = ""
         self.log_lines: list[str] = []
         self.started = time.time()
@@ -276,6 +284,66 @@ class CartJob:
         self.mode = "full"
         # chỉ số dòng -> kết quả cũ, giữ trong lúc quét lại để khôi phục nếu dừng
         self._retry_old: dict[int, dict] = {}
+        # Kiểm tra giỏ trước khi bỏ giỏ (chỉ lượt đầy đủ; quét lại thì không).
+        self.check_cart = True
+        self.decision_timeout = CART_DECISION_TIMEOUT
+        self.phase = ""                  # "" / checking_cart / clearing_cart
+        self.cart_info: dict | None = None
+        self.cart_choice = ""
+        self._decision = threading.Event()
+        self._wait_deadline: float | None = None
+
+    @property
+    def active(self) -> bool:
+        """Lượt đang chiếm trình duyệt (chạy hoặc chờ quyết định)."""
+        return self.status in ("running", WAITING_CART)
+
+    # --- kiểm tra giỏ / chờ quyết định
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self.phase = phase
+
+    def ask_cart_decision(self, info: dict, timeout: float | None = None) -> str:
+        """Dừng lượt, chờ người dùng chọn keep/clear/cancel. Chạy trong luồng
+        runner. Dừng lượt hoặc quá hạn thì trả 'cancel'."""
+        wait = self.decision_timeout if timeout is None else timeout
+        with self._lock:
+            self.cart_info = info
+            self.cart_choice = ""
+            self._decision.clear()
+            self.phase = ""
+            self.status = WAITING_CART
+            self._wait_deadline = time.time() + wait
+        end = time.monotonic() + wait
+        timed_out = False
+        while not self._decision.wait(0.05):
+            if self.cancelled:
+                break
+            if time.monotonic() >= end:
+                timed_out = True
+                break
+        with self._lock:
+            choice = self.cart_choice
+            if not choice:                   # không ai chọn: huỷ
+                choice = "cancel"
+                self.cart_choice = choice
+            if self.status == WAITING_CART:
+                self.status = "running"
+            self.cart_info, self._wait_deadline = None, None
+        if timed_out and choice == "cancel":
+            self.log("Quá thời gian chờ chọn về giỏ hàng, coi như Huỷ.")
+        return choice
+
+    def decide_cart(self, choice: str) -> str:
+        """Nhận lựa chọn của người dùng. Trả chuỗi lỗi, "" nếu được."""
+        if choice not in CART_CHOICES:
+            return "Lựa chọn không hợp lệ (keep / clear / cancel)."
+        with self._lock:
+            if self.status != WAITING_CART or self._decision.is_set():
+                return "Lượt này không đang chờ quyết định về giỏ hàng."
+            self.cart_choice = choice
+            self._decision.set()
+        return ""
 
     # --- quét lại vài dòng bằng tên đã sửa
     def begin_retry(self, edits: dict[int, str]) -> str:
@@ -298,6 +366,7 @@ class CartJob:
                                  "status": "pending", "group": "",
                                  "retry_query": q}
             self.mode = "retry"
+            self.phase, self.cart_info = "", None
             self.status, self.error = "running", ""
             self.started, self.finished = time.time(), None
             self._cancel.clear()
@@ -314,7 +383,7 @@ class CartJob:
     def log(self, msg: str) -> None:
         with self._lock:
             self.log_lines.append(str(msg))
-            del self.log_lines[:-50]
+            del self.log_lines[:-300]
 
     def start_line(self, i: int) -> None:
         with self._lock:
@@ -344,6 +413,7 @@ class CartJob:
                 it.setdefault("message", "")
                 it["message"] = it["message"] or "chưa chạy tới"
             self._retry_old = {}
+            self.phase, self.cart_info, self._wait_deadline = "", None, None
             self.status, self.error = status, error
             self.finished = time.time()
 
@@ -367,6 +437,10 @@ class CartJob:
                 "id": self.id,
                 "status": self.status,
                 "mode": self.mode,
+                "phase": self.phase,
+                "cart": dict(self.cart_info) if self.cart_info else None,
+                "cart_wait_left": (max(0, round(self._wait_deadline - time.time()))
+                                   if self._wait_deadline else None),
                 "retry": retry,
                 "error": self.error,
                 "shop_url": self.shop_url,
@@ -375,7 +449,7 @@ class CartJob:
                 "done": done,
                 "counts": counts,
                 "items": items,
-                "log": list(self.log_lines[-8:]),
+                "log": list(self.log_lines[-40:]),
                 "elapsed": round((self.finished or time.time()) - self.started, 1),
             }
 
@@ -387,6 +461,9 @@ class RetryView:
     chỉ số thật trong CartJob, nên dùng lại nguyên `browser_cart_runner`
     (cùng phiên trình duyệt, độ trễ, chặn thanh toán) mà không phải sửa.
     """
+
+    # Quét lại KHÔNG kiểm tra / làm trống giỏ: giỏ lúc này đã có món của lượt trước.
+    check_cart = False
 
     def __init__(self, job: CartJob, index: list[int]) -> None:
         self.job, self.index = job, list(index)
@@ -431,6 +508,57 @@ def retry_line(orig: BomLine, query: str) -> BomLine | None:
 CartRunner = Callable[[list[BomLine], str, CartJob, dict], None]
 
 
+def cart_precheck(filler: Any, job: Any, timeout: float | None = None) -> bool:
+    """Bước kiểm tra giỏ trước dòng BOM đầu tiên. True = chạy tiếp.
+
+    `filler` cần `inspect_cart()`, `clear_cart(log)` và thuộc tính `cart_floor`
+    (xem browser.cart.CartFiller). Giỏ trống: chạy thẳng. Giỏ có đồ hoặc không
+    đọc được: dừng chờ người dùng chọn keep / clear / cancel (quá hạn = cancel).
+    Chỉ 'clear' mới đụng vào giỏ, và nếu giỏ chưa về 0 thì ném CartClearError
+    (lượt báo lỗi, không bỏ giỏ tiếp). Không bao giờ tự làm trống.
+    """
+    from ..browser.cart import CartClearError, CartState
+
+    job.set_phase(PHASE_CHECKING)
+    job.log("Đang kiểm tra giỏ…")
+    try:
+        state = filler.inspect_cart()
+    except Exception as e:                               # noqa: BLE001
+        state = CartState(error=f"{type(e).__name__}: {e}")
+    if state.is_empty:
+        filler.cart_floor = 0
+        job.set_phase("")
+        job.log("Giỏ trống, bắt đầu bỏ linh kiện vào giỏ.")
+        return True
+
+    info = state.to_json()
+    job.log(info["message"] + (f" ({state.error})" if state.error else "")
+            + ", chờ bạn chọn.")
+    choice = job.ask_cart_decision(info, timeout)
+    if choice == "keep":
+        filler.cart_floor = state.n          # None nếu không biết: không có mốc
+        job.log("Giữ nguyên giỏ và bỏ thêm. Món cũ trong giỏ không bị đụng tới.")
+        return True
+    if choice == "clear":
+        job.set_phase(PHASE_CLEARING)
+        job.log("Đang làm trống giỏ…")
+        after = filler.clear_cart(job.log)
+        if not after.is_empty:
+            left = after.n
+            what = f"còn {left} món" if left else "không xác nhận được giỏ đã trống"
+            raise CartClearError(
+                f"Làm trống giỏ không thành công ({what}). Đã dừng, chưa bỏ "
+                f"linh kiện nào vào giỏ — hãy tự xoá giỏ rồi chạy lại.")
+        filler.cart_floor = 0
+        job.set_phase("")
+        job.log("Đã làm trống giỏ (đọc lại: 0 món). Bắt đầu bỏ linh kiện vào giỏ.")
+        return True
+    job.set_phase("")
+    job.log("Đã huỷ: không bỏ gì vào giỏ, không đụng tới giỏ hiện có.")
+    job.cancel()
+    return False
+
+
 def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
                         shops: dict[str, Shop]) -> None:
     """Runner thật: mở Chrome bằng profile đã đăng nhập, bỏ từng dòng vào giỏ.
@@ -454,6 +582,9 @@ def browser_cart_runner(lines: list[BomLine], shop_url: str, job: CartJob,
                             no_image_out_of_stock=shop_option(
                                 base, "no_image_means_out_of_stock", shops,
                                 default=None))
+        # Lượt đầy đủ kiểm tra giỏ trước; quét lại (RetryView) thì bỏ qua.
+        if getattr(job, "check_cart", False) and not cart_precheck(filler, job):
+            return
         for i, line in enumerate(lines):
             if job.cancelled:
                 return
@@ -484,6 +615,7 @@ class App:
         self.source_mtime = latest_source_mtime(self.source_root)
         self._lock = threading.Lock()
         self.cart_runner: CartRunner = cart_runner or browser_cart_runner
+        self.cart_decision_timeout = CART_DECISION_TIMEOUT
         self._jobs: dict[str, CartJob] = {}
         self._last_job: CartJob | None = None
         self._threads: dict[str, threading.Thread] = {}
@@ -499,9 +631,10 @@ class App:
             return {"error": "Link shop phải bắt đầu bằng http:// hoặc https://"}
         with self._lock:
             cur = self._last_job
-            if cur is not None and cur.status == "running":
+            if cur is not None and cur.active:
                 return {"error": "Đang chạy một lượt khác, chờ xong hoặc bấm Dừng."}
             job = CartJob(lines, shop_url, str(payload.get("filename") or ""))
+            job.decision_timeout = self.cart_decision_timeout
             self._jobs = {job.id: job}        # chỉ giữ lượt gần nhất
             self._last_job = job
         self._spawn(job, lines, job, self.shops())
@@ -547,7 +680,7 @@ class App:
             edits[i] = q                       # trùng chỉ số: lấy lần cuối
         with self._lock:
             cur = self._last_job
-            if cur is not None and cur.status == "running":
+            if cur is not None and cur.active:
                 return {"error": "Đang chạy một lượt khác, chờ xong hoặc bấm Dừng."}
             if job is not cur:
                 return {"error": "Chỉ quét lại được lượt gần nhất."}
@@ -559,6 +692,18 @@ class App:
         job.log(f"Quét lại {len(index)} dòng bằng tên đã sửa…")
         self._spawn(job, lines, RetryView(job, index), self.shops())
         return {"ok": True, "id": job.id, "total": len(index)}
+
+    def cart_decision(self, payload: dict) -> dict:
+        """Người dùng chọn khi giỏ shop đã có đồ: {id, choice: keep|clear|cancel}."""
+        job_id = str(payload.get("id") or "")
+        job = self._jobs.get(job_id) if job_id else None
+        if job is None:
+            return {"error": "Không có lượt chạy này (có thể đã bắt đầu lượt mới)."}
+        choice = str(payload.get("choice") or "")
+        err = job.decide_cart(choice)
+        if err:
+            return {"error": err}
+        return {"ok": True, "id": job.id, "choice": choice}
 
     def job(self, job_id: str = "") -> dict:
         job = self._jobs.get(job_id) if job_id else self._last_job
@@ -809,6 +954,7 @@ def make_handler(app: App):
                 "/api/start": app.start_cart,
                 "/api/stop": app.stop_cart,
                 "/api/cart/retry": app.retry_cart,
+                "/api/cart/decision": app.cart_decision,
             }
             fn = routes.get(path)
             if fn is None:

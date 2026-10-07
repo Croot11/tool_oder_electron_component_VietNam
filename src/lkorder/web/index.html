@@ -153,6 +153,21 @@
   .rq{color:var(--cta);font-size:12px}
   .retrybar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
   .retrybar button.mini{border-color:var(--cta);color:var(--cta);font-weight:600}
+  /* ---------- kiểm tra giỏ trước khi bỏ ---------- */
+  .step{display:flex;align-items:center;gap:6px;margin:10px 0 2px;font-weight:600;color:var(--accent)}
+  .bar.busy>i{width:40%;animation:slide 1.1s ease-in-out infinite alternate}
+  @keyframes slide{from{margin-left:0}to{margin-left:60%}}
+  .cartbox{border:1px solid var(--cta);background:var(--cta-bg);border-radius:10px;
+    padding:13px 15px;margin:12px 0}
+  .cartbox h3{margin:0 0 6px;font-size:14.5px;color:var(--cta)}
+  .cartbox ul{margin:6px 0 10px;padding-left:19px;max-height:210px;overflow:auto}
+  .cartbox li{margin:2px 0}
+  .cartbox .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .cartbox button.mini{padding:7px 13px;font-weight:600}
+  .cartbox button.mini.keep{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+  .cartbox button.mini.danger{background:var(--cta);color:#fff;border-color:var(--cta)}
+  .cartbox button.mini:disabled{opacity:.5}
+  .log.full{max-height:170px;overflow:auto}
 </style>
 </head>
 <body>
@@ -373,6 +388,43 @@ $('#startbtn').onclick = async () => {
   watchJob(r.id);
 };
 
+// đang chạy hoặc đang chờ người dùng chọn về giỏ hàng
+const isBusy = j => j.status === 'running' || j.status === 'waiting_cart_decision';
+
+async function sendCartChoice(j, choice){
+  const n = j.cart && j.cart.count;
+  if (choice === 'clear' && !confirm(n ? `Xoá ${n} món trong giỏ?` : 'Xoá toàn bộ món trong giỏ?')) return;
+  let r;
+  try { r = await api('/api/cart/decision', {id: j.id, choice}); }
+  catch (e) { r = {error: 'Không gọi được máy chủ: ' + e}; }
+  if (r.error){ CART.retryMsg = r.error; renderJob(CART.last); return; }
+  CART.retryMsg = '';
+  watchJob(j.id);
+}
+
+function cartBox(j){
+  const c = j.cart || {};
+  const items = c.items || [];
+  const left = j.cart_wait_left;
+  let h = '<div class="cartbox"><h3>⚠ ' + esc(c.message || 'Giỏ đang có đồ') + '</h3>';
+  if (c.known === false)
+    h += '<div>Tool chưa đọc được giỏ nên không biết có món cũ hay không. Bạn chọn cách xử lý:</div>';
+  else
+    h += '<div>Món cũ trong giỏ có thể bị cộng dồn số lượng với món trong BOM.</div>';
+  if (items.length){
+    h += '<ul>' + items.slice(0, 40).map(it =>
+      `<li>${esc(it.name)}${it.qty ? ` <span class="sub">× ${it.qty}</span>` : ''}</li>`).join('')
+      + (items.length > 40 ? `<li class="sub">… và ${items.length - 40} món nữa</li>` : '') + '</ul>';
+  }
+  h += `<div class="acts">
+    <button class="mini keep" data-cd="keep">Giữ nguyên và bỏ thêm</button>
+    <button class="mini danger" data-cd="clear">Làm trống giỏ rồi bỏ</button>
+    <button class="mini" data-cd="cancel">Huỷ</button></div>`;
+  h += `<div class="hint">Tool chỉ bấm nút xoá trên trang giỏ, không bao giờ thanh toán.` +
+    (left != null ? ` Không chọn trong ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')} thì tự Huỷ.` : '') + '</div></div>';
+  return h;
+}
+
 function watchJob(id){
   CART.jobId = id;
   clearTimeout(CART.timer);
@@ -382,7 +434,7 @@ function watchJob(id){
     catch (e) { CART.timer = setTimeout(tick, 2000); return; }
     if (!r.job){ setRunning(false); return; }
     renderJob(r.job);
-    if (r.job.status === 'running') CART.timer = setTimeout(tick, 1000);
+    if (isBusy(r.job)) CART.timer = setTimeout(tick, 1000);
     else setRunning(false);
   };
   setRunning(true);
@@ -418,21 +470,26 @@ async function retryItems(items){
 function renderJob(j){
   CART.last = j;
   if (CART.editsJob !== j.id){ CART.edits = {}; CART.editsJob = j.id; CART.retryMsg = ''; }
-  const running = j.status === 'running';
+  const waiting = j.status === 'waiting_cart_decision';
+  const running = isBusy(j);
   const retrying = running && j.mode === 'retry';
   const prog = retrying && j.retry ? j.retry : {done: j.done, total: j.total};
   const pct = prog.total ? Math.round(100 * prog.done / prog.total) : 0;
   let h = '<div class="card">';
-  h += `<h2>${retrying ? 'Đang quét lại' : running ? 'Đang chạy' : 'Kết quả'} — ${esc(j.filename || 'BOM')}
+  h += `<h2>${retrying ? 'Đang quét lại' : waiting ? 'Chờ bạn chọn về giỏ hàng' : running ? 'Đang chạy' : 'Kết quả'} — ${esc(j.filename || 'BOM')}
     <span class="sub" style="text-transform:none;font-weight:400"> · ${esc(j.shop_url)}</span></h2>`;
-  h += `<div class="bar"><i style="width:${pct}%"></i></div>
+  const stepMsg = j.phase === 'checking_cart' ? 'Đang kiểm tra giỏ…'
+    : j.phase === 'clearing_cart' ? 'Đang làm trống giỏ…' : '';
+  if (stepMsg) h += `<div class="step"><span class="spin"></span>${stepMsg}</div>`;
+  h += `<div class="bar${stepMsg ? ' busy' : ''}"><i style="width:${stepMsg ? '' : pct + '%'}"></i></div>
     <div class="row" style="align-items:center"><span class="sub">${prog.done}/${prog.total} ${retrying ? 'dòng quét lại' : 'linh kiện'} · ${j.elapsed}s</span>
     ${running ? '<span style="flex:none"><button class="mini" id="stopbtn">Dừng</button></span>' : ''}</div>`;
   if (j.status === 'error') h += `<div class="note bad" style="margin-top:12px"><b>Dừng vì lỗi:</b> ${esc(j.error)}</div>`;
   if (j.status === 'cancelled') h += '<div class="note warn" style="margin-top:12px">Đã dừng theo yêu cầu.</div>';
   if (j.status === 'done') h += `<div class="note ok" style="margin-top:12px">Xong. Mở giỏ hàng của shop để
     xem lại và tự thanh toán.</div>`;
-  if (j.log && j.log.length) h += `<div class="log">${esc(j.log.join('\n'))}</div>`;
+  if (waiting) h += cartBox(j);
+  if (j.log && j.log.length) h += `<div class="log full">${esc(j.log.join('\n'))}</div>`;
 
   h += '<div class="groups">' + GROUPS.map(([g, lbl]) =>
     `<button data-g="${g}" class="${CART.filter===g?'on':''}"><span class="n">${j.counts[g]}</span>${lbl}</button>`
@@ -498,7 +555,7 @@ function renderJob(j){
       const it = itemOf(el.dataset.edit);
       el.classList.toggle('changed', !!(it && editedValue(it)));
       const ra = $('#retryall'), n = changedItems(j).length;
-      if (ra){ ra.disabled = j.status === 'running' || !n;
+      if (ra){ ra.disabled = isBusy(j) || !n;
                ra.textContent = 'Quét lại các dòng đã sửa' + (n ? ` (${n})` : ''); }
     };
     el.onkeydown = e => {
@@ -519,12 +576,16 @@ function renderJob(j){
     CART.filter = CART.filter === b.dataset.g ? 'all' : b.dataset.g; renderJob(CART.last); });
   const sa = $('#showall');
   if (sa) sa.onclick = e => { e.preventDefault(); CART.filter = 'all'; renderJob(CART.last); };
+  out.querySelectorAll('[data-cd]').forEach(b => b.onclick = () => {
+    out.querySelectorAll('[data-cd]').forEach(x => x.disabled = true);
+    sendCartChoice(j, b.dataset.cd).finally(() => out.querySelectorAll('[data-cd]').forEach(x => x.disabled = false));
+  });
   const sb = $('#stopbtn');
   if (sb) sb.onclick = async () => { sb.disabled = true; await api('/api/stop', {id: j.id}); };
 }
 
 // mở lại trang giữa chừng thì theo dõi tiếp lượt đang chạy
-api('/api/job').then(r => { if (r.job) { if (r.job.status === 'running') watchJob(r.job.id); else renderJob(r.job); } });
+api('/api/job').then(r => { if (r.job) { if (isBusy(r.job)) watchJob(r.job.id); else renderJob(r.job); } });
 
 /* ---------- đặt hàng ---------- */
 // ibom.html của KiCad rất nặng (nhúng cả mạch), không đổ vào ô nhập mà giữ

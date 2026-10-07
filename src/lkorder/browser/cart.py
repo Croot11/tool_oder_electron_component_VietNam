@@ -57,6 +57,15 @@ SEARCH_URLS: dict[str, str] = {
 }
 DEFAULT_SEARCH_URL = "{base}/search?q={q}"
 
+# Đường dẫn trang giỏ theo nền tảng (thử lần lượt tới khi gặp trang giỏ thật).
+CART_PATHS: dict[str, tuple[str, ...]] = {
+    "haravan": ("/cart",),
+    "shopify": ("/cart",),
+    "sapo": ("/cart",),
+    "woo": ("/cart/", "/gio-hang/"),
+}
+DEFAULT_CART_PATHS = ("/cart", "/gio-hang")
+
 # ------------------------------------------------------------ an toàn
 
 _FORBIDDEN = re.compile(
@@ -73,6 +82,10 @@ def is_checkout_like(text: str = "", href: str = "") -> bool:
 
 class CheckoutRefused(RuntimeError):
     """Tool đã từ chối bấm một nút trông như nút thanh toán."""
+
+
+class CartClearError(RuntimeError):
+    """Làm trống giỏ không thành công (còn món, hoặc không thấy nút xoá)."""
 
 
 # ------------------------------------------------------------ bộ chọn CSS
@@ -114,6 +127,56 @@ class CartSelectors:
         "input[name='s']",
         "input[name='query']",
         "input[name='keyword']",
+    )
+    # Chỉ dùng trên TRANG GIỎ khi người dùng chọn "Làm trống giỏ". Danh sách
+    # cho phép rõ ràng: nút xoá một món / xoá tất cả. Không có nút thanh toán.
+    clear_button: tuple[str, ...] = (
+        "button:has-text('Xoá tất cả')",
+        "button:has-text('Xóa tất cả')",
+        "a:has-text('Xoá tất cả')",
+        "a:has-text('Xóa tất cả')",
+        "button:has-text('Xóa giỏ hàng')",
+        "a:has-text('Xóa giỏ hàng')",
+        "button:has-text('Xoá giỏ hàng')",
+        "a:has-text('Xoá giỏ hàng')",
+        "button:has-text('Làm trống giỏ')",
+        "a:has-text('Làm trống giỏ')",
+        "button:has-text('Clear cart')",
+        "a:has-text('Clear cart')",
+        "button:has-text('Empty cart')",
+        "a:has-text('Empty cart')",
+        "button[name='clear']",
+        "a.clear-cart",
+        "button.clear-cart",
+        "#clear-cart",
+    )
+    remove_button: tuple[str, ...] = (
+        "a.remove",
+        "button.remove",
+        "a.remove_from_cart_button",
+        "td.product-remove a",
+        "a.product-remove",
+        "a.cart__remove",
+        "button.cart__remove",
+        ".cart-item__remove",
+        "a.cart-remove",
+        "button.cart-remove",
+        "a.btn-remove",
+        "button.btn-remove",
+        "a.remove-item",
+        "button.remove-item",
+        "[data-action='remove']",
+        "[data-cart-remove]",
+        "a:has-text('Xoá')",
+        "a:has-text('Xóa')",
+        "button:has-text('Xoá')",
+        "button:has-text('Xóa')",
+        "a:has-text('Remove')",
+        "button:has-text('Remove')",
+        "a[aria-label*='xóa' i]",
+        "button[aria-label*='xóa' i]",
+        "a[aria-label*='remove' i]",
+        "button[aria-label*='remove' i]",
     )
 
 
@@ -171,6 +234,206 @@ def has_added_message(html: str) -> bool:
     """Trang có thông báo kiểu 'Đã thêm vào giỏ hàng' không."""
     t = _fold(parse_html(html).text())
     return any(k in t for k in _ADDED_TEXTS)
+
+
+# ------------------------------------------------------------ đọc trang giỏ
+
+
+@dataclass
+class CartItem:
+    """Một dòng trong trang giỏ: tên + số lượng (None nếu không đọc được)."""
+
+    name: str
+    qty: Optional[int] = None
+
+    def label(self) -> str:
+        return f"{self.name} × {self.qty}" if self.qty else self.name
+
+
+@dataclass
+class CartState:
+    """Giỏ hàng hiện tại, đọc từ biểu tượng giỏ và trang giỏ."""
+
+    count: Optional[int] = None          # số trên biểu tượng giỏ
+    items: list[CartItem] = field(default_factory=list)
+    empty_confirmed: bool = False        # trang giỏ ghi rõ "giỏ trống"
+    source: str = ""                     # trang giỏ đã đọc
+    error: str = ""
+
+    @property
+    def n(self) -> Optional[int]:
+        """Số món trong giỏ; None = không xác định được."""
+        vals = []
+        if self.count is not None:
+            vals.append(self.count)
+        if self.items:
+            vals.append(len(self.items))
+        if vals:
+            return max(vals)
+        return 0 if self.empty_confirmed else None
+
+    @property
+    def known(self) -> bool:
+        return self.n is not None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.n == 0
+
+    def message(self) -> str:
+        n = self.n
+        if n is None:
+            return "Không xác định được giỏ có đồ hay không"
+        return f"Giỏ đang có {n} món"
+
+    def to_json(self) -> dict:
+        return {"known": self.known, "count": self.n, "message": self.message(),
+                "error": self.error,
+                "items": [{"name": i.name, "qty": i.qty} for i in self.items]}
+
+
+_EMPTY_CART_TEXTS = (
+    "gio hang trong", "gio hang cua ban dang trong", "gio hang cua ban trong",
+    "khong co san pham nao trong gio", "chua co san pham nao trong gio",
+    "gio hang cua ban chua co san pham", "gio hang chua co san pham",
+    "your cart is empty", "cart is currently empty", "cart is empty",
+    "no items in your cart", "no products in the cart",
+)
+
+_QTY_NAME = re.compile(r"qty|quantity|so[-_]?luong|^sl$|^updates")
+_NOT_QTY_TYPES = ("hidden", "submit", "button", "checkbox", "radio", "image")
+
+
+def cart_page_says_empty(html: str) -> bool:
+    """Trang có dòng kiểu 'Giỏ hàng trống' / 'Your cart is empty' không."""
+    t = _fold(parse_html(html).text())
+    return any(k in t for k in _EMPTY_CART_TEXTS)
+
+
+def _is_qty_input(n: Node) -> bool:
+    if n.tag != "input" or n.get("type").lower() in _NOT_QTY_TYPES:
+        return False
+    names = [n.get("name").lower(), n.id] + n.classes
+    return any(_QTY_NAME.search(x) for x in names if x)
+
+
+# --- nhận diện nút xoá (không bao giờ là nút thanh toán)
+
+_CLEAR_WORDS = re.compile(
+    r"xoa (?:tat ca|het|toan bo|gio)|lam trong gio|clear (?:the )?cart|"
+    r"empty (?:the |your )?cart|remove all|delete all")
+_REMOVE_WORDS = re.compile(
+    r"\b(?:xoa|remove|delete)\b|bo khoi gio|bo san pham")
+_REMOVE_ATTR = re.compile(r"remove|delete|(?:^|[-_ ])del(?:$|[-_ ])|xoa|clear[-_]?cart")
+_REMOVE_HREF = re.compile(
+    r"quantity=0|[?&/](?:remove|delete)|remove[-_]?(?:item|from)|action=remove|"
+    r"/xoa|delete[-_]?item")
+_X_LABELS = ("×", "x", "✕", "✖", "╳", "✗")
+
+
+def _attrs_text(attrs: Iterable[str]) -> str:
+    return " ".join(a for a in attrs if a).lower()
+
+
+def control_kind(text: str = "", attrs: str = "", href: str = "") -> str:
+    """'remove' (xoá một món), 'clear' (xoá tất cả) hoặc '' (không phải nút xoá).
+
+    Nút trông như thanh toán/đặt hàng luôn trả ''.
+    """
+    flat = re.sub(r"[-_]+", " ", attrs or "")
+    if is_checkout_like(text, href) or is_checkout_like(flat)             or "checkout" in (attrs or "").lower():
+        return ""
+    label = _fold((text or "").strip())
+    if _CLEAR_WORDS.search(label):
+        return "clear"
+    if (text or "").strip().lower() in _X_LABELS or _REMOVE_WORDS.search(label):
+        return "remove"
+    if _REMOVE_ATTR.search((attrs or "").lower()) or _REMOVE_HREF.search(
+            (href or "").lower()):
+        return "remove"
+    return ""
+
+
+def _node_label(n: Node) -> str:
+    return n.text() or n.get("value") or n.get("aria-label") or n.get("title")
+
+
+def _node_kind(n: Node) -> str:
+    is_input = n.tag == "input" and n.get("type").lower() in ("submit", "button")
+    if n.tag not in ("a", "button") and not is_input:
+        return ""
+    attrs = _attrs_text(n.classes + [n.id, n.get("name"), n.get("data-action"),
+                                    n.get("onclick"), n.get("title"),
+                                    n.get("aria-label")])
+    return control_kind(_node_label(n), attrs, n.get("href"))
+
+
+def cart_controls(html: str) -> dict[str, list[str]]:
+    """Các nút xoá nhận diện được trên trang giỏ: {'remove': [...], 'clear': [...]}
+    (giá trị là chữ trên nút). Nút thanh toán không bao giờ lọt vào đây."""
+    out: dict[str, list[str]] = {"remove": [], "clear": []}
+    for n in parse_html(html).iter():
+        kind = _node_kind(n)
+        if kind:
+            out[kind].append(_node_label(n))
+    return out
+
+
+def _item_name(row: Node) -> str:
+    for a in row.find_all(lambda n: n.tag == "a"):
+        t = a.text()
+        if len(t) >= 2 and not _node_kind(a) and not is_checkout_like(t, a.get("href")):
+            return t
+    for tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        h = row.find(lambda n, tag=tag: n.tag == tag)
+        if h is not None and h.text():
+            return h.text()
+    img = row.find(lambda n: n.tag == "img" and n.get("alt").strip())
+    return img.get("alt").strip() if img is not None else ""
+
+
+def _item_row(inp: Node) -> Optional[Node]:
+    """Phần tử chứa đúng MỘT dòng giỏ (một ô số lượng) và có tên sản phẩm."""
+    for a in inp.ancestors():
+        if a.tag in ("body", "html", "#root", "form", "table", "tbody", "ul", "ol"):
+            break
+        if len(a.find_all(_is_qty_input)) > 1:
+            break
+        if _item_name(a):
+            return a
+    return None
+
+
+def read_cart_items(html: str) -> list[CartItem]:
+    """Danh sách món (tên + số lượng) trên trang giỏ. Mỗi dòng giỏ = một ô số
+    lượng; tên lấy từ link sản phẩm cùng dòng. Không đọc được thì []."""
+    root = parse_html(html)
+    items: list[CartItem] = []
+    seen: set[tuple[str, Optional[int]]] = set()
+    for inp in root.find_all(_is_qty_input):
+        row = _item_row(inp)
+        name = _item_name(row) if row is not None else ""
+        v = inp.get("value").strip()
+        qty = int(float(v)) if re.fullmatch(r"\d+(?:\.\d+)?", v) else None
+        key = (name, qty)
+        if name and key in seen:        # mini-cart lặp lại cùng dòng
+            continue
+        seen.add(key)
+        items.append(CartItem(name or "(không rõ tên)", qty))
+    return items
+
+
+def items_removed(before: list[CartItem], after: list[CartItem]) -> list[CartItem]:
+    """Các món có trong `before` mà không còn trong `after` (so theo tên + SL)."""
+    left = [(i.name, i.qty) for i in after]
+    gone = []
+    for it in before:
+        key = (it.name, it.qty)
+        if key in left:
+            left.remove(key)
+        else:
+            gone.append(it)
+    return gone
 
 
 @dataclass
@@ -309,7 +572,8 @@ class CartFiller:
                  rand: Callable[[float, float], float] = random.uniform,
                  clock: Callable[[], float] = time.monotonic,
                  notify: Callable[[str], None] | None = None,
-                 no_image_out_of_stock: bool = False) -> None:
+                 no_image_out_of_stock: bool = False,
+                 cart_url: str | None = None) -> None:
         self.page = page
         # data/shops.json "no_image_means_out_of_stock": shop có bộ xử lý riêng
         # (vd CXT) coi sản phẩm không có ảnh là hết hàng.
@@ -322,6 +586,13 @@ class CartFiller:
         self.confirm_timeout, self.poll = confirm_timeout, poll
         self.sleep, self.rand, self.clock = sleep, rand, clock
         self.notify = notify
+        # Trang giỏ (thử lần lượt) để đọc/làm trống giỏ.
+        self.cart_urls: tuple[str, ...] = (cart_url,) if cart_url else tuple(
+            self.base_url + p for p in CART_PATHS.get(platform, DEFAULT_CART_PATHS))
+        self._cart_url = ""
+        # Mốc số món trong giỏ: đọc ở bước kiểm tra giỏ rồi cập nhật theo từng
+        # lần thêm. None = chưa có mốc, khi đó không được tin vào số trên giỏ.
+        self.cart_floor: Optional[int] = None
 
     # -- tiện ích
 
@@ -417,23 +688,203 @@ class CartFiller:
         assert best is not None
         return best
 
+    # -- đọc / làm trống giỏ
+
+    def _count_of(self, html: str) -> Optional[int]:
+        """Số trên biểu tượng giỏ của trang `html` (shop có bộ riêng thì ghi đè)."""
+        return read_cart_count(html)
+
+    def _state_of(self, html: str, url: str = "") -> CartState:
+        return CartState(count=self._count_of(html), items=read_cart_items(html),
+                         empty_confirmed=cart_page_says_empty(html), source=url)
+
+    def inspect_cart(self) -> CartState:
+        """Giỏ hiện tại: số trên biểu tượng giỏ ở trang đang mở + danh sách món
+        đọc từ trang giỏ. Chỉ đọc, không bấm gì. Mở trang giỏ nên trang hiện tại
+        sẽ đổi."""
+        state = CartState()
+        try:
+            state.count = self._count_of(self.page.content())
+        except Exception:
+            pass
+        errors: list[str] = []
+        for url in self.cart_urls:
+            try:
+                html = self._goto(url)
+            except Exception as e:
+                errors.append(f"{url}: {type(e).__name__}: {e}")
+                continue
+            page = self._state_of(html, url)
+            if page.count is not None:
+                state.count = max(state.count or 0, page.count)
+            if page.items or page.empty_confirmed:        # đúng là trang giỏ
+                state.items, state.empty_confirmed = page.items, page.empty_confirmed
+                state.source = self._cart_url = url
+                break
+        if not state.source and errors:
+            state.error = "; ".join(errors)
+        return state
+
+    def _reload_cart(self) -> CartState:
+        return self._state_of(self._goto(self._cart_url), self._cart_url)
+
+    @staticmethod
+    def _attr(handle: Any, name: str) -> str:
+        try:
+            return handle.get_attribute(name) or ""
+        except Exception:
+            return ""
+
+    def _control_attrs(self, handle: Any) -> str:
+        return " ".join(self._attr(handle, a) for a in (
+            "class", "id", "name", "onclick", "data-action", "title", "aria-label"))
+
+    def _click_cart_control(self, handle: Any) -> str:
+        """Bấm một nút xoá trên trang giỏ. CHỈ bấm nút nhận diện là xoá; nút
+        có vẻ thanh toán thì ném CheckoutRefused, nút lạ thì CartClearError.
+        Trả về 'remove' hoặc 'clear'."""
+        text, href = self._label(handle)
+        attrs = self._control_attrs(handle)
+        if is_checkout_like(text, href) or is_checkout_like(
+                re.sub(r"[-_]+", " ", attrs)) or "checkout" in attrs.lower():
+            raise CheckoutRefused(
+                f"Từ chối bấm nút có vẻ là thanh toán khi làm trống giỏ: {text!r}")
+        kind = control_kind(text, attrs, href)
+        if not kind:
+            raise CartClearError(f"Không bấm nút lạ trên trang giỏ: {text!r}")
+        self._safe_click(handle)
+        return kind
+
+    def clear_cart(self, log: Callable[[str], None] | None = None) -> CartState:
+        """Xoá hết món trong giỏ, trả về giỏ đọc lại sau khi xoá (người gọi phải
+        kiểm tra `is_empty`). Chỉ bấm nút xoá theo `selectors.clear_button` /
+        `remove_button`; mọi lần bấm đi qua `_click_cart_control` -> `_safe_click`
+        nên không bao giờ bấm Thanh toán/Đặt hàng/Mua ngay. Ghi log từng món đã xoá.
+        """
+        log = log or self._say
+        cur = self.inspect_cart()
+        if cur.is_empty:
+            return cur
+        if not self._cart_url:
+            raise CartClearError("không mở được trang giỏ hàng để xoá")
+        handler = self._accept_dialogs()
+        try:
+            btn = self._first(self.sel.clear_button)
+            if btn is not None:
+                self._click_cart_control(btn)
+                self.sleep(self.poll)
+                new = self._reload_cart()
+                self._log_removed(log, cur, new)
+                cur = new
+            budget = max(cur.n or 0, len(cur.items)) + 3
+            stuck = 0
+            while not cur.is_empty and budget > 0:
+                budget -= 1
+                btn = self._first(self.sel.remove_button)
+                if btn is None:
+                    break
+                self._click_cart_control(btn)
+                self.sleep(self.poll)
+                new = self._reload_cart()
+                gone = self._log_removed(log, cur, new)
+                stuck = 0 if gone else stuck + 1
+                cur = new
+                if stuck >= 2:
+                    break
+        finally:
+            self._drop_dialogs(handler)
+        return self.inspect_cart()
+
+    @staticmethod
+    def _log_removed(log: Callable[[str], None], before: CartState,
+                     after: CartState) -> int:
+        gone = items_removed(before.items, after.items)
+        for it in gone:
+            log(f"Đã xoá khỏi giỏ: {it.label()}")
+        if not gone and (before.n or 0) > (after.n or 0):
+            log(f"Đã xoá {(before.n or 0) - (after.n or 0)} món khỏi giỏ "
+                f"(không đọc được tên)")
+            return 1
+        return len(gone)
+
+    def _accept_dialogs(self) -> Any:
+        """Trang giỏ hay hỏi 'Bạn có chắc muốn xoá?' bằng hộp thoại: đồng ý, trừ
+        hộp thoại nhắc tới thanh toán."""
+        def handler(d: Any) -> None:
+            try:
+                if is_checkout_like(getattr(d, "message", "") or ""):
+                    d.dismiss()
+                else:
+                    d.accept()
+            except Exception:
+                pass
+        on = getattr(self.page, "on", None)
+        if on is None:
+            return None
+        try:
+            on("dialog", handler)
+        except Exception:
+            return None
+        return handler
+
+    def _drop_dialogs(self, handler: Any) -> None:
+        off = getattr(self.page, "remove_listener", None)
+        if handler is not None and off is not None:
+            try:
+                off("dialog", handler)
+            except Exception:
+                pass
+
     # -- thêm vào giỏ
 
+    def _count_confirms(self, before: Optional[int], after: Optional[int]) -> str:
+        """Số trên giỏ có chứng tỏ đã thêm không. Trả lý do, '' nếu không.
+
+        Mốc: số đọc trước khi bấm; không có thì số đọc ở bước kiểm tra giỏ
+        (`cart_floor`). Không có mốc nào thì KHÔNG tin vào số trên giỏ, vì giỏ có
+        thể đã có đồ từ trước.
+        """
+        ref = before if before is not None else self.cart_floor
+        if ref is None or after is None or after <= ref:
+            return ""
+        if self.cart_floor is not None:
+            self.cart_floor = after
+        if before is not None:
+            return f"giỏ tăng {before} -> {after}"
+        return f"giỏ tăng {ref} -> {after} (so với lúc kiểm tra giỏ)"
+
+    def _sync_floor(self, before: Optional[int]) -> None:
+        """Số đọc được trước khi bấm cũng là mốc mới (chỉ nâng, không hạ)."""
+        if before is not None and self.cart_floor is not None:
+            self.cart_floor = max(self.cart_floor, before)
+
+    def _note_cart(self, after: Optional[int], added: bool) -> None:
+        """Cập nhật mốc số món sau một lần thêm không xác nhận được bằng số.
+        `added`: đã xác nhận bằng cách khác. Mốc chỉ được nâng, không hạ, để
+        không báo thêm nhầm ở lần sau."""
+        if self.cart_floor is None:
+            return
+        floor = self.cart_floor + (1 if added else 0)
+        self.cart_floor = max(floor, after) if after is not None else floor
+
     def _wait_added(self, before: Optional[int], product_url: str) -> tuple[bool, str]:
+        self._sync_floor(before)
         deadline = self.clock() + self.confirm_timeout
         while True:
             html = self.page.content()
             after = read_cart_count(html)
-            if before is not None and after is not None and after > before:
-                return True, f"giỏ tăng {before} -> {after}"
-            if before is None and after is not None and after > 0:
-                return True, f"giỏ có {after} món"
+            why = self._count_confirms(before, after)
+            if why:
+                return True, why
             if has_added_message(html):
+                self._note_cart(after, True)
                 return True, "shop báo đã thêm vào giỏ"
             url = (getattr(self.page, "url", "") or "").lower()
             if url != product_url.lower() and re.search(r"/cart\b|/gio-hang", url):
+                self._note_cart(after, True)
                 return True, "đã chuyển sang trang giỏ hàng"
             if self.clock() >= deadline:
+                self._note_cart(after, False)
                 return False, "bấm thêm vào giỏ nhưng không thấy giỏ tăng"
             self.sleep(self.poll)
 
