@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gom đơn linh kiện</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --ink:#16191d; --muted:#6b7280; --line:#e3e6ea;
+    --accent:#1d6fe0; --accent-ink:#fff; --warn:#b45309; --warn-bg:#fef6e7;
+    --bad:#b42318; --bad-bg:#fdf0ef; --ok:#0f7b45; --ok-bg:#eefaf3;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.1);
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#14171b; --panel:#1b1f24; --ink:#e8eaed; --muted:#9aa3ad; --line:#2c323a;
+      --accent:#4b93f0; --accent-ink:#0b1220; --warn:#f0b45c; --warn-bg:#2c2416;
+      --bad:#f2837a; --bad-bg:#2e1c1a; --ok:#63c894; --ok-bg:#16281f;
+      --shadow:none;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:18px 22px;border-bottom:1px solid var(--line);background:var(--panel);
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:650}
+  header .sub{color:var(--muted);font-size:13px}
+  nav{margin-left:auto;display:flex;gap:4px}
+  nav button{background:none;border:1px solid transparent;color:var(--muted);
+    padding:6px 12px;border-radius:7px;cursor:pointer;font-size:13px;font-weight:550}
+  nav button:hover{background:var(--bg)}
+  nav button.on{background:var(--accent);color:var(--accent-ink)}
+  main{max-width:1180px;margin:0 auto;padding:20px 22px 60px}
+  .tab{display:none} .tab.on{display:block}
+
+  .cols{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:18px;align-items:start}
+  @media (max-width:880px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    padding:16px;box-shadow:var(--shadow);margin-bottom:16px}
+  .card h2{font-size:13px;margin:0 0 10px;text-transform:uppercase;
+    letter-spacing:.05em;color:var(--muted);font-weight:650}
+  label{display:block;font-size:12.5px;color:var(--muted);margin:12px 0 5px;font-weight:550}
+  textarea,input[type=text],input[type=number],select{width:100%;padding:9px 11px;
+    border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);
+    font:inherit}
+  textarea{min-height:230px;resize:vertical;
+    font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:13px;line-height:1.65}
+  input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  button.go{background:var(--accent);color:var(--accent-ink);border:0;padding:11px 16px;
+    border-radius:8px;font:inherit;font-weight:650;cursor:pointer;width:100%;margin-top:14px}
+  button.go:disabled{opacity:.55;cursor:default}
+  button.mini{background:var(--bg);border:1px solid var(--line);color:var(--ink);
+    padding:5px 10px;border-radius:6px;font:inherit;font-size:12.5px;cursor:pointer}
+  button.mini:hover{border-color:var(--accent);color:var(--accent)}
+  .row{display:flex;gap:10px} .row>*{flex:1}
+  .hint{font-size:12.5px;color:var(--muted);margin-top:7px}
+
+  .slider{display:flex;align-items:center;gap:11px}
+  .slider input[type=range]{flex:1;accent-color:var(--accent)}
+  .slider .val{font-weight:650;min-width:82px;text-align:right;font-variant-numeric:tabular-nums}
+
+  .totals{display:flex;gap:22px;flex-wrap:wrap;align-items:baseline;
+    padding:15px 17px;background:var(--panel);border:1px solid var(--line);
+    border-radius:11px;margin-bottom:16px;box-shadow:var(--shadow)}
+  .totals .big{font-size:25px;font-weight:700;font-variant-numeric:tabular-nums}
+  .totals .lbl{font-size:12px;color:var(--muted);display:block;font-weight:550}
+  .totals .n{font-size:17px;font-weight:650}
+
+  .order{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    margin-bottom:14px;overflow:hidden;box-shadow:var(--shadow)}
+  .order>.hd{display:flex;align-items:center;gap:11px;padding:12px 16px;
+    border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .order .num{background:var(--accent);color:var(--accent-ink);width:23px;height:23px;
+    border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;flex:none}
+  .order .nm{font-weight:650}
+  .order .hd a{color:var(--muted);font-size:12.5px;text-decoration:none}
+  .order .hd a:hover{color:var(--accent);text-decoration:underline}
+  .order .hd .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:8px 16px;text-align:left;border-bottom:1px solid var(--line);
+    vertical-align:top}
+  th{font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+    font-weight:650}
+  tbody tr:last-child td{border-bottom:0}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .sub{color:var(--muted);font-size:12.5px}
+  .foot{padding:11px 16px;background:var(--bg);display:flex;justify-content:flex-end;
+    gap:18px;font-variant-numeric:tabular-nums;flex-wrap:wrap}
+
+  .note{padding:11px 14px;border-radius:9px;margin-bottom:14px;font-size:13px}
+  .note.warn{background:var(--warn-bg);color:var(--warn);border:1px solid currentColor}
+  .note.bad{background:var(--bad-bg);color:var(--bad);border:1px solid currentColor}
+  .note.ok{background:var(--ok-bg);color:var(--ok);border:1px solid currentColor}
+  .note b{font-weight:650}
+  .note ul{margin:7px 0 0;padding-left:19px} .note li{margin:2px 0}
+
+  .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11.5px;
+    border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .pill.good{color:var(--ok);border-color:currentColor}
+  .pill.mid{color:var(--warn);border-color:currentColor}
+  .scen td{cursor:default}
+  .scen tr.best td{font-weight:650}
+  .empty{color:var(--muted);text-align:center;padding:46px 20px}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;
+    border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite;
+    vertical-align:-2px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(1turn)}}
+  code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:12.5px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Gom đơn linh kiện</h1>
+  <span class="sub">Mua đủ đồ, ít đơn nhất, rẻ nhất có thể</span>
+  <nav>
+    <button data-tab="order" class="on">Đặt hàng</button>
+    <button data-tab="match">Kiểm tra khớp</button>
+    <button data-tab="shops">Shop</button>
+    <button data-tab="catalog">Bảng giá</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ============ ĐẶT HÀNG ============ -->
+<section class="tab on" id="tab-order">
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2>Cần mua gì</h2>
+        <textarea id="bom" spellcheck="false" placeholder="STM32F103C8T6 x2&#10;NE555 x5&#10;Điện trở 10K 1/4W x100&#10;Tụ gốm 100nF x50"></textarea>
+        <div class="hint">Mỗi dòng một món. Số lượng ghi <code>x10</code>,
+          <code>10 x</code> hay dấu phẩy đều được. Dán thẳng từ Excel cũng chạy.</div>
+
+        <label>Ngại đặt nhiều đơn tới mức nào</label>
+        <div class="slider">
+          <input type="range" id="pen" min="0" max="200000" step="5000" value="20000">
+          <span class="val" id="penv">20.000đ</span>
+        </div>
+        <div class="hint">Số tiền bạn sẵn sàng trả thêm để bớt được một đơn.
+          Kéo cao thì tool gom mạnh hơn.</div>
+
+        <label>Ép tối đa bao nhiêu đơn</label>
+        <select id="maxshops">
+          <option value="">Không ép — để tool tự cân</option>
+          <option value="1">1 đơn</option><option value="2">2 đơn</option>
+          <option value="3">3 đơn</option><option value="4">4 đơn</option>
+        </select>
+
+        <button class="go" id="run">Tìm cách đặt tốt nhất</button>
+      </div>
+    </div>
+
+    <div id="out"><div class="card empty">Nhập danh sách linh kiện rồi bấm
+      <b>Tìm cách đặt tốt nhất</b>.</div></div>
+  </div>
+</section>
+
+<!-- ============ KHỚP ============ -->
+<section class="tab" id="tab-match">
+  <div class="card">
+    <h2>Tool hiểu đúng ý bạn chưa</h2>
+    <div class="hint">Đây là chỗ dễ sai nhất: <code>NE555</code> phải được hiểu là
+      cùng con với <code>IC NE555P DIP-8</code>. Xem lại trước khi đặt tiền thật.</div>
+    <button class="go" id="runmatch" style="max-width:230px">Kiểm tra danh sách</button>
+  </div>
+  <div id="mout"></div>
+</section>
+
+<!-- ============ SHOP ============ -->
+<section class="tab" id="tab-shops">
+  <div class="card">
+    <h2>Shop</h2>
+    <div class="hint">Sửa cho khớp thực tế của bạn. <b>Phí phiền</b> là mức bạn
+      thấy đáng để bớt một đơn — nó quyết định tool gom mạnh hay nhẹ.</div>
+    <div style="overflow-x:auto"><table id="shoptbl"></table></div>
+    <button class="go" id="saveshops" style="max-width:200px">Lưu</button>
+    <span id="shopmsg" class="hint"></span>
+  </div>
+</section>
+
+<!-- ============ BẢNG GIÁ ============ -->
+<section class="tab" id="tab-catalog">
+  <div class="card">
+    <h2>Bảng giá</h2>
+    <div class="hint" id="catinfo"></div>
+    <label>Nội dung CSV</label>
+    <textarea id="catcsv" spellcheck="false" style="min-height:390px"></textarea>
+    <div class="hint">Cột bắt buộc <code>shop,ten,gia</code>. Thêm được
+      <code>sku</code>, <code>ton</code>, <code>moq</code>,
+      <code>pack</code> (số con mỗi gói), <code>bac_gia</code>
+      (<code>10:4000|100:3500</code>), <code>url</code>.</div>
+    <button class="go" id="savecat" style="max-width:200px">Lưu bảng giá</button>
+    <span id="catmsg" class="hint"></span>
+  </div>
+</section>
+
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const vnd = n => (n||0).toLocaleString('vi-VN') + 'đ';
+const esc = s => String(s??'').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, body){
+  const opt = body ? {method:'POST', headers:{'Content-Type':'application/json'},
+                      body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+/* ---------- tab ---------- */
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x===b));
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('on', t.id === 'tab-'+b.dataset.tab));
+  if (b.dataset.tab === 'catalog') loadCatalog();
+});
+
+/* ---------- đặt hàng ---------- */
+const pen = $('#pen');
+pen.oninput = () => $('#penv').textContent = vnd(+pen.value);
+
+$('#run').onclick = async () => {
+  const btn = $('#run');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>Đang tính…';
+  try {
+    const r = await api('/api/solve', {
+      bom: $('#bom').value,
+      penalty: +pen.value,
+      max_shops: $('#maxshops').value || null,
+    });
+    renderSolve(r);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Tìm cách đặt tốt nhất';
+  }
+};
+
+function renderSolve(r){
+  const out = $('#out');
+  if (r.error){ out.innerHTML = `<div class="note bad">${esc(r.error)}</div>`; return; }
+  const s = r.solution;
+  let h = '';
+
+  if (s.unmet.length) h += `<div class="note bad"><b>Không tìm thấy
+    ${s.unmet.length} món</b> — phải tự tìm chỗ khác:<ul>` +
+    s.unmet.map(u => `<li>${esc(u.need)} × ${u.qty}</li>`).join('') + '</ul></div>';
+
+  if (r.warnings.length) h += `<div class="note warn"><b>Kiểm tra lại
+    ${r.warnings.length} món khớp chưa chắc chắn:</b><ul>` +
+    r.warnings.map(w => `<li>Bạn ghi <b>${esc(w.need)}</b>, tool lấy
+      “${esc(w.matched)}” ở ${esc(w.shop)} <span class="pill mid">${w.score}</span></li>`)
+      .join('') + '</ul></div>';
+
+  h += `<div class="totals">
+    <div><span class="lbl">Tổng phải trả</span><span class="big">${vnd(s.total)}</span></div>
+    <div><span class="lbl">Số đơn</span><span class="n">${s.n_shops}</span></div>
+    <div><span class="lbl">Tiền hàng</span><span class="n">${vnd(s.parts_cost)}</span></div>
+    <div><span class="lbl">Tiền ship</span><span class="n">${vnd(s.shipping_cost)}</span></div>
+    <div><span class="lbl">Dự kiến chờ</span><span class="n">~${s.prep_days} ngày</span></div>
+  </div>`;
+
+  s.orders.forEach((o,i) => {
+    h += `<div class="order"><div class="hd">
+      <span class="num">${i+1}</span><span class="nm">${esc(o.shop)}</span>`;
+    if (o.url) h += `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.url)}</a>`;
+    h += `<span class="right"><button class="mini" data-copy="${i}">Copy danh sách</button></span>
+      </div><table><thead><tr>
+      <th>Cần</th><th>Sản phẩm ở shop</th><th class="num">Mua</th>
+      <th class="num">Đơn giá</th><th class="num">Thành tiền</th></tr></thead><tbody>`;
+    o.items.forEach(it => {
+      h += `<tr><td>${esc(it.need)} <span class="sub">× ${it.need_qty}</span></td>
+        <td>${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>`
+                     : esc(it.title)}
+        ${it.surplus > 0 ? `<div class="sub">mua nguyên gói → nhận ${it.pieces}, dư ${it.surplus}</div>` : ''}</td>
+        <td class="num">${esc(it.qty_label)}</td>
+        <td class="num">${vnd(it.unit_price)}</td>
+        <td class="num">${vnd(it.subtotal)}</td></tr>`;
+    });
+    h += `</tbody></table><div class="foot">
+      <span class="sub">Tiền hàng ${vnd(o.subtotal)}</span>
+      <span class="sub">Ship ${o.shipping ? vnd(o.shipping)
+        : '0đ — đã đạt mức freeship'}</span>
+      <b>${vnd(o.total)}</b></div></div>`;
+  });
+
+  if (r.scenarios.length > 1){
+    const ok = r.scenarios.filter(x => !x.unmet).map(x => x.total);
+    const cheap = ok.length ? Math.min(...ok) : 0;
+    h += `<div class="card"><h2>Ép về ít đơn hơn thì đắt thêm bao nhiêu</h2>
+      <table class="scen"><thead><tr><th class="num">Đơn</th><th>Đặt ở</th>
+      <th class="num">Tổng trả</th><th class="num">So với rẻ nhất</th>
+      <th>Ghi chú</th></tr></thead><tbody>`;
+    r.scenarios.forEach(x => {
+      const d = x.total - cheap;
+      h += `<tr class="${!x.unmet && d<=0 ? 'best':''}">
+        <td class="num">${x.k}</td><td>${esc(x.shops.join(', '))}</td>
+        <td class="num">${vnd(x.total)}</td>
+        <td class="num">${x.unmet ? '—' : (d<=0 ? 'rẻ nhất' : '+'+vnd(d))}</td>
+        <td>${x.unmet ? `<span class="pill mid">thiếu ${x.unmet} món</span>`
+                      : '<span class="pill good">mua đủ</span>'}</td></tr>`;
+    });
+    h += '</tbody></table></div>';
+  }
+
+  out.innerHTML = h;
+  out.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
+    const o = s.orders[+b.dataset.copy];
+    const txt = o.items.map(it =>
+      `${it.title} — ${it.qty_label} × ${vnd(it.unit_price)}`).join('\n')
+      + `\n\nTổng hàng: ${vnd(o.subtotal)}`;
+    navigator.clipboard.writeText(txt).then(() => {
+      b.textContent = 'Đã copy';
+      setTimeout(() => b.textContent = 'Copy danh sách', 1400);
+    });
+  });
+}
+
+/* ---------- khớp ---------- */
+$('#runmatch').onclick = async () => {
+  const r = await api('/api/match', {bom: $('#bom').value});
+  const out = $('#mout');
+  if (!r.rows || !r.rows.length){
+    out.innerHTML = '<div class="card empty">Chưa có gì để kiểm tra — '
+      + 'nhập danh sách ở tab <b>Đặt hàng</b> trước.</div>';
+    return;
+  }
+  out.innerHTML = r.rows.map(row => {
+    const weak = !row.found.length || row.found[0].score < 0.9;
+    let h = `<div class="card"><h2>${weak ? '⚠ ' : ''}${esc(row.need)} × ${row.qty}
+      <span class="sub" style="text-transform:none;font-weight:400"> khoá: ${esc(row.key)}</span></h2>`;
+    if (!row.found.length){
+      h += '<div class="note bad">Không shop nào bán món này.</div></div>';
+      return h;
+    }
+    h += `<table><thead><tr><th>Shop</th><th>Sản phẩm</th><th class="num">Giá</th>
+      <th class="num">Điểm</th><th>Kiểu</th></tr></thead><tbody>`;
+    row.found.forEach(f => {
+      h += `<tr><td>${esc(f.shop)}</td>
+        <td>${f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.title)}</a>`
+                    : esc(f.title)}
+          ${f.pack>1 ? `<span class="sub"> (gói ${f.pack})</span>` : ''}</td>
+        <td class="num">${vnd(f.price)}</td>
+        <td class="num"><span class="pill ${f.score>=0.9?'good':'mid'}">${f.score}</span></td>
+        <td class="sub">${esc(f.how)}</td></tr>`;
+    });
+    return h + '</tbody></table></div>';
+  }).join('');
+};
+
+/* ---------- shop ---------- */
+let SHOPS = [];
+async function loadShops(){
+  const st = await api('/api/state');
+  SHOPS = st.shops;
+  $('#catinfo').textContent =
+    `${st.catalog.n_offers} sản phẩm, ${st.catalog.n_keys} loại linh kiện — ${st.catalog.path}`;
+  const t = $('#shoptbl');
+  t.innerHTML = `<thead><tr><th>Dùng</th><th>Tên</th><th>Web</th>
+    <th class="num">Ship</th><th class="num">Freeship từ</th>
+    <th class="num">Phí phiền</th><th class="num">Ngày chờ</th><th>Nền tảng</th></tr></thead>
+    <tbody>` + SHOPS.map((s,i) => `<tr>
+      <td><input type="checkbox" data-i="${i}" data-f="enabled" ${s.enabled?'checked':''}></td>
+      <td><input type="text" data-i="${i}" data-f="name" value="${esc(s.name)}" style="min-width:130px"></td>
+      <td><input type="text" data-i="${i}" data-f="url" value="${esc(s.url)}" style="min-width:170px"></td>
+      <td><input type="number" data-i="${i}" data-f="shipping_fee" value="${s.shipping_fee}" step="1000" style="width:96px"></td>
+      <td><input type="number" data-i="${i}" data-f="free_ship_threshold" value="${s.free_ship_threshold}" step="10000" style="width:106px"></td>
+      <td><input type="number" data-i="${i}" data-f="order_penalty" value="${s.order_penalty}" step="5000" style="width:96px"></td>
+      <td><input type="number" data-i="${i}" data-f="prep_days" value="${s.prep_days}" style="width:62px"></td>
+      <td><select data-i="${i}" data-f="platform" style="width:104px">
+        ${['csv','haravan','woo','jsonld'].map(p =>
+          `<option ${p===s.platform?'selected':''}>${p}</option>`).join('')}
+      </select></td></tr>`).join('') + '</tbody>';
+
+  t.querySelectorAll('[data-f]').forEach(el => el.onchange = () => {
+    const s = SHOPS[+el.dataset.i], f = el.dataset.f;
+    s[f] = el.type === 'checkbox' ? el.checked
+         : el.type === 'number' ? (+el.value||0) : el.value;
+  });
+}
+$('#saveshops').onclick = async () => {
+  const r = await api('/api/shops', {shops: SHOPS});
+  $('#shopmsg').textContent = r.error ? '✗ ' + r.error : `✓ Đã lưu ${r.n} shop.`;
+  setTimeout(() => $('#shopmsg').textContent = '', 2600);
+};
+
+/* ---------- bảng giá ---------- */
+async function loadCatalog(){
+  const r = await api('/api/catalog');
+  $('#catcsv').value = r.csv || '';
+}
+$('#savecat').onclick = async () => {
+  const r = await api('/api/catalog', {csv: $('#catcsv').value});
+  $('#catmsg').textContent = r.error ? '✗ ' + r.error
+    : `✓ Đã lưu, ${r.n_offers} sản phẩm.`;
+  if (!r.error) loadShops();
+  setTimeout(() => $('#catmsg').textContent = '', 2600);
+};
+
+loadShops();
+</script>
+</body>
+</html>

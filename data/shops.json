@@ -1,0 +1,76 @@
+{
+  "shops": [
+    {
+      "id": "thegioiic",
+      "name": "Thế Giới IC",
+      "url": "https://www.thegioiic.com",
+      "platform": "csv",
+      "shipping_fee": 30000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 2,
+      "enabled": true,
+      "note": "Nhiều IC, linh kiện rời. Kiểm tra lại phí ship thực tế."
+    },
+    {
+      "id": "nshop",
+      "name": "Nshop",
+      "url": "https://nshopvn.com",
+      "platform": "csv",
+      "shipping_fee": 25000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 2,
+      "enabled": true,
+      "note": "Mạnh về module, cảm biến, Arduino."
+    },
+    {
+      "id": "hshop",
+      "name": "Hshop",
+      "url": "https://hshop.vn",
+      "platform": "csv",
+      "shipping_fee": 30000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 2,
+      "enabled": true,
+      "note": "Module, cảm biến, board phát triển."
+    },
+    {
+      "id": "lkthuduc",
+      "name": "Linh Kiện Thủ Đức",
+      "url": "https://linhkienthuduc.com",
+      "platform": "csv",
+      "shipping_fee": 30000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 3,
+      "enabled": true,
+      "note": "Linh kiện rời, giá tốt cho hàng thụ động."
+    },
+    {
+      "id": "icdayroi",
+      "name": "IC Đây Rồi",
+      "url": "https://icdayroi.com",
+      "platform": "csv",
+      "shipping_fee": 30000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 3,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "id": "banlinhkien",
+      "name": "Bán Linh Kiện",
+      "url": "https://banlinhkien.com",
+      "platform": "csv",
+      "shipping_fee": 30000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 3,
+      "enabled": true,
+      "note": "Ở Hà Nội."
+    }
+  ]
+}

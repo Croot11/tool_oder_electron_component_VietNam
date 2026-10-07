@@ -1,0 +1,14 @@
+# Danh sách linh kiện cần mua.
+# Mỗi dòng một món. Số lượng ghi kiểu "x10", "10 x", hoặc cách bằng dấu phẩy.
+# Dòng bắt đầu bằng # bị bỏ qua.
+
+STM32F103C8T6 x2
+NE555 x5
+LM358 x3
+Điện trở 10K 1/4W x100
+Tụ gốm 100nF x50
+Thạch anh 8MHz x2
+LED 5mm đỏ x20
+LM2596 x3
+DHT22 x1
+NRF24L01 x2

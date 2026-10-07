@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lkorder"
+version = "0.1.0"
+description = "Tim linh kien o shop VN va gom ve it don nhat co the"
+requires-python = ">=3.10"
+dependencies = []          # chi dung thu vien chuan
+
+[project.scripts]
+lk = "lkorder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"lkorder.web" = ["*.html"]
