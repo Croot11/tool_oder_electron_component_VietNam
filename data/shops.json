@@ -71,6 +71,18 @@
       "prep_days": 3,
       "enabled": true,
       "note": "Ở Hà Nội."
+    },
+    {
+      "id": "cxt",
+      "name": "CXT",
+      "url": "https://linhkien.cxtvn.com",
+      "platform": "csv",
+      "shipping_fee": 30000,
+      "free_ship_threshold": 0,
+      "order_penalty": 20000,
+      "prep_days": 2,
+      "enabled": true,
+      "note": "cxtvn.com. Thêm giỏ dùng bộ xử lý riêng (browser/shops/cxtvn.py). Kiểm tra lại phí ship thực tế."
     }
   ]
 }

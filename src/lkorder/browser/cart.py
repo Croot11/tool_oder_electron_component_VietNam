@@ -282,7 +282,18 @@ class LineResult:
 
 
 class CartFiller:
-    """Bỏ các dòng BOM vào giỏ của MỘT shop, dùng một trang Playwright."""
+    """Bỏ các dòng BOM vào giỏ của MỘT shop, dùng một trang Playwright.
+
+    Shop có bộ xử lý riêng (xem `browser/shops`, vd *.cxtvn.com) thì
+    `CartFiller(page, base_url, ...)` tự trả về lớp riêng đó.
+    """
+
+    def __new__(cls, page: Any = None, base_url: str = "", *args: Any,
+                **kwargs: Any) -> "CartFiller":
+        if cls is CartFiller:
+            from .shops import filler_class_for
+            cls = filler_class_for(base_url) or cls
+        return super().__new__(cls)
 
     def __init__(self, page: Any, base_url: str, *,
                  search_url: str | None = None,
