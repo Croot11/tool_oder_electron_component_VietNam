@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .models import BomLine
-from .normalize import normalize
+from .normalize import normalize, parse
 
 CAN_KIEM_TRA = "cần kiểm tra"
 
@@ -487,16 +487,66 @@ def enrich(value: str, footprint: str) -> Enriched:
         prefix = "" if re.search(r"diode|zener|tvs", value, re.I) else "Diode"
         return Enriched(_join(prefix, value, m.group(1)))
 
-    # ---- IC / transistor: thêm kiểu chân nếu chưa có
-    m = _PKG.search(fp)
+    # ---- điện trở / tụ băng (array, network): R_Array_Convex_4x0603
+    m = _ARRAY_FP.match(fp)
     if m:
-        pkg = m.group(1)
-        if re.fullmatch(r"SOT-223-\d+", pkg, re.I):
-            pkg = pkg[:7]
+        n = re.search(r"(?<![\dA-Za-z])(\d{1,2})x(\d{4})(?!\d)", fp)
+        size = f"{n.group(2)}x{n.group(1)}" if n else ""
+        if m.group(1).upper() == "C":
+            v, check = _cap_value(value)
+            return Enriched(_join("Tụ băng", size, v), check)
+        v, check = _res_value(value)
+        return Enriched(_join("Điện trở băng", size, v), check)
+
+    # ---- IC / transistor: thêm kiểu chân nếu chưa có
+    # Giữ kiểu chân (SMD/DIP) ghi ở đuôi Value: "PC817_SMD" -> "PC817 SMD".
+    value_mount = ""
+    m = _VAL_MOUNT.search(value)
+    if m and parse(value[:m.start()]).kind == "mpn":
+        value = value[:m.start()].strip()
+        value_mount = _mount_label(m.group(1))
+    pkg = _ic_package(fp)
+    if not pkg and (value_mount or parse(value).kind == "mpn"):
+        pkg = value_mount or _fp_mount(fp)
+    if pkg:
         base = re.sub(r"^((?:TO|SOT)-\d+)-\d+$", r"\1", pkg, flags=re.I)
-        if base.upper() not in value.upper():
+        if not re.search(rf"(?<![A-Za-z0-9]){re.escape(base)}(?![A-Za-z0-9])",
+                         value, re.I):
             return Enriched(_join(value, pkg.upper() if pkg[0].isalpha() else pkg))
     return Enriched(value, check)
+
+
+_ARRAY_FP = re.compile(r"([RC])_(?:Array|Pack|Network)", re.I)
+_VAL_MOUNT = re.compile(r"[\s_/-]+(SMD|SMT|DIP|THT)$", re.I)
+
+
+def _mount_label(word: str) -> str:
+    return "SMD" if word.upper() in ("SMD", "SMT") else "DIP"
+
+
+def _ic_package(fp: str) -> str:
+    """Kiểu chân IC trong tên footprint: 'SOIC-8', 'SOT-23', 'DIP-4'...
+
+    SMDIP (DIP chân bẻ dán, vd PC817 dán) là SMD, không phải DIP.
+    """
+    if re.search(r"SMDIP|SMD-?DIP|DIP-?\d*[_-]SMD", fp, re.I):
+        return "SMD"
+    m = _PKG.search(fp)
+    if not m:
+        return ""
+    pkg = m.group(1)
+    if re.fullmatch(r"SOT-223-\d+", pkg, re.I):
+        pkg = pkg[:7]
+    return pkg
+
+
+def _fp_mount(fp: str) -> str:
+    """'SMD' / 'DIP' khi footprint chỉ ghi chung chung (PC817_SMD, X_THT)."""
+    if re.search(r"(?<![A-Za-z])(?:SMD|SMT)(?![A-Za-z])", fp, re.I):
+        return "SMD"
+    if re.search(r"(?<![A-Za-z])(?:THT|DIP)(?![A-Za-z])", fp, re.I):
+        return "DIP"
+    return ""
 
 
 def _join(*parts: str) -> str:
