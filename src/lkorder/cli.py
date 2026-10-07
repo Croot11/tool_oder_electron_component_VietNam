@@ -448,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as e:
         print(f"Lỗi: {e}", file=sys.stderr)
         return 2
+    except bom_mod.BomFormatError as e:
+        print(f"Lỗi đọc BOM: {e}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
 
