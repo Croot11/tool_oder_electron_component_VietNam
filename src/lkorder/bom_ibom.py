@@ -422,8 +422,9 @@ def enrich(value: str, footprint: str) -> Enriched:
 
     # ---- tụ tantal / tụ hoá / tụ gốm
     if "tantal" in lib_l or re.match(r"CP_Tantalum", fp, re.I):
-        v = eia_cap(value) or value
-        return Enriched(_join("Tụ tantal", _case(fp), v))
+        v = _with_unit(eia_cap(value) or value, "F")
+        size = _tantal_size(fp)
+        return Enriched(_join("Tụ tantal", size or _case(fp), v))
     if re.match(r"CP_(Elec|Radial|Axial)", fp, re.I):
         v = eia_cap(value) or value
         return Enriched(_join("Tụ hoá", v))
@@ -449,7 +450,28 @@ def enrich(value: str, footprint: str) -> Enriched:
         if re.search(r"ferrite|bead|\bFB\b", value, re.I):
             return Enriched(_join("Ferrite bead", size, value))
         v = value if _has_unit(value, "H") else (eia_ind(value) or value)
-        return Enriched(_join("Cuộn cảm", size, v))
+        return Enriched(_join("Cuộn cảm", size, _with_unit(v, "H")))
+    if re.match(r"L_", fp) or "inductor" in lib_l:
+        if not re.search(r"ferrite|bead|\bFB\b", value, re.I):
+            v = value if _has_unit(value, "H") else (eia_ind(value) or value)
+            return Enriched(_join("Cuộn cảm", _ind_size(fp), _with_unit(v, "H")))
+
+    # ---- thạch anh
+    if "crystal" in lib_l or re.match(r"Crystal|Resonator", fp, re.I):
+        freq = _freq(value)
+        size = _crystal_size(fp)
+        if freq:
+            return Enriched(_join("Thạch anh", size, freq))
+        return Enriched(_join("Thạch anh", size, value), check=True)
+
+    # ---- cầu chì
+    if "fuse" in lib_l or re.match(r"Fuse_", fp, re.I):
+        m = re.match(r"Fuse_(\d{4})_", fp, re.I)
+        size = m.group(1) if m else ""
+        amp = _amp(value)
+        if amp:
+            return Enriched(_join("Cầu chì", size, amp))
+        return Enriched(_join("Cầu chì", size, value), check=True)
 
     # ---- LED
     m = re.match(r"LED_D(\d+(?:\.\d+)?)mm", fp, re.I)
@@ -488,6 +510,69 @@ def _drop(value: str, word: str) -> str:
 def _case(fp: str) -> str:
     m = re.search(r"(?:Case|Kemet|AVX)-([A-Z])(?![A-Za-z])", fp)
     return f"case {m.group(1)}" if m else ""
+
+
+_TANTAL_CASE = {"A": "3216", "B": "3528", "C": "6032", "D": "7343", "E": "7343"}
+
+
+def _tantal_size(fp: str) -> str:
+    """Mã kích thước hệ mét của tụ tantal: CP_EIA-3216-18_Kemet-A -> '3216'."""
+    m = re.search(r"(?:EIA-|Tantalum_)(\d{4})", fp, re.I) or \
+        re.search(r"(?<!\d)(3216|3528|6032|7343)(?!\d)", fp)
+    if m:
+        return m.group(1)
+    m = re.search(r"Case-([A-E])(?![A-Za-z])", fp)
+    return _TANTAL_CASE.get(m.group(1), "") if m else ""
+
+
+def _ind_size(fp: str) -> str:
+    """Kích thước cuộn cảm công suất: L_Bourns_SRN6045TA -> '6045'."""
+    m = re.search(r"(?<!\d)(\d{4})(?!\d)", fp)
+    return m.group(1) if m else ""
+
+
+def _crystal_size(fp: str) -> str:
+    if re.search(r"HC-?49", fp, re.I):
+        return "HC49 SMD" if re.search(r"SMD", fp, re.I) else "HC49"
+    m = re.search(r"(?<!\d)(\d{4})-\d+Pin", fp, re.I) or \
+        re.search(r"(?<!\d)(2016|2520|3225|5032|7050)(?!\d)", fp)
+    return m.group(1) if m else ""
+
+
+def _with_unit(v: str, unit: str) -> str:
+    """'10u' -> '10uF' ; '10uF' giữ nguyên ; '10' giữ nguyên (không đoán)."""
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*[pnum]", v, re.I):
+        return v.replace(" ", "") + unit
+    return v
+
+
+def _freq(value: str) -> str:
+    """Tần số thạch anh chuẩn hoá: '8M' -> '8MHz', '32.768K' -> '32.768kHz'."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([kKmM])?(?:Hz|HZ|hz)", value)
+    if not m:
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM])?\s*", value)
+    if not m:
+        return ""
+    num, pre = float(m.group(1)), (m.group(2) or "").lower()
+    if not pre:
+        if num >= 1000:
+            num, pre = num / 1000, "k"
+            if num >= 1000:
+                num, pre = num / 1000, "m"
+        else:
+            pre = "m"           # '16.000' trên thạch anh: hầu như luôn là MHz
+    return f"{num:g}{'MHz' if pre == 'm' else 'kHz'}"
+
+
+def _amp(value: str) -> str:
+    """Dòng định mức cầu chì: '500mA', '0.5A', 'Polyfuse_1.5A' -> chuẩn hoá."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(m)?A(?![a-zA-Z])", value)
+    if not m:
+        return ""
+    num = float(m.group(1))
+    if m.group(2):
+        return f"{num:g}mA"
+    return f"{num * 1000:g}mA" if num < 1 else f"{num:g}A"
 
 
 def _cap_value(value: str) -> tuple[str, bool]:

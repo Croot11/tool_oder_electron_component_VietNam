@@ -27,8 +27,8 @@ from urllib.parse import urljoin
 
 from ..models import BomLine
 from ..normalize import (
-    KIND_MAIN_UNIT, MPN_RE, NOISE_WORDS, KIND_TOKENS, format_eng, parse,
-    parse_value, similarity, strip_accents,
+    KIND_MAIN_UNIT, KIND_PHRASES, MPN_RE, NOISE_WORDS, KIND_TOKENS, format_eng,
+    parse, parse_value, similarity, strip_accents, tokenize,
 )
 
 # Ngưỡng mặc định
@@ -560,14 +560,400 @@ def score_title(query: str, title: str) -> tuple[float, str]:
     return _score_generic(pq, query, title)
 
 
+# ------------------------------------------------ giá trị + kích thước chân
+#
+# Dòng BOM là linh kiện rời có GIÁ TRỊ và KÍCH THƯỚC CHÂN (thường đến từ
+# ibom.html: "Tụ 0603 100nF", "Tụ tantal 3216 10uF") thì hai thứ này là bắt
+# buộc: sai giá trị hoặc sai kích thước là loại hẳn (điểm 0). Tên loại ("tụ",
+# "điện trở") không bắt buộc, chỉ bị trừ điểm khi kết quả rõ ràng là loại khác
+# (NTC, biến trở, module, kit...).
+
+VALUE_KINDS = ("resistor", "capacitor", "inductor", "crystal", "fuse")
+_VALUE_UNIT = {**KIND_MAIN_UNIT, "fuse": "a"}
+
+# Kích thước chân dạng mã 4 số. Mã hệ mét quy về mã hệ inch cho dễ so:
+# 1608 = 0603, 3216 = 1206 (tụ tantal case A)...
+_METRIC_TO_INCH = {"1005": "0402", "1608": "0603", "2012": "0805", "3216": "1206",
+                   "3225": "1210", "4532": "1812", "5025": "2010", "6332": "2512",
+                   "2520": "1008", "5750": "2220"}
+_KNOWN_SIZES = {
+    "0201", "0402", "0603", "0805", "1206", "1210", "1806", "1812", "2010", "2220",
+    "2512", "1008", *_METRIC_TO_INCH,
+    "3528", "6032", "7343",                         # tụ tantal case B/C/D
+    "2016", "5032", "7050",                         # thạch anh SMD
+    "3015", "3020", "4018", "4020", "4030", "5020", "5040", "6028", "6045",
+    "8040", "1040",                                 # cuộn cảm công suất
+}
+_TANTAL_CASE = {"a": "3216", "b": "3528", "c": "6032", "d": "7343", "e": "7343"}
+_SIZE_RE = re.compile(r"(?<![\d.,])(\d{4})(?![\d.,])")
+_HC49_RE = re.compile(r"hc-?49(?:[\s/-]*[su](?![a-z]))?(?:[\s/-]*(smd|smt))?")
+_CASE_RE = re.compile(r"\b(?:case|size|type|loai|kich thuoc)\s*([a-e])\b")
+_THT_WORDS = re.compile(r"\b(?:dip|tht|through hole|xuyen lo|radial|axial|"
+                        r"chan cam|loai cam)\b")
+_THT_ACCENT = re.compile(r"cắm|xuyên lỗ")
+
+# Loại xung đột rõ với linh kiện rời: trừ điểm (không loại hẳn).
+_CONFLICT_WORDS = re.compile(
+    r"\b(ntc|ptc|thermistor|dien tro nhiet|bien tro|chiet ap|potentiometer|"
+    r"trimmer|trimpot|module|kit|mach|board)\b")
+_CONFLICT_PENALTY = 0.45
+
+_PACK_BEFORE = {"goi", "tui", "bich", "set", "cuon", "hop", "lot", "pack", "x"}
+_COUNT_AFTER = {"con", "cai", "chiec", "pcs", "pc", "c", "vien"}
+
+
+def canon_size(code: str) -> str:
+    code = code.lower()
+    return _METRIC_TO_INCH.get(code, code)
+
+
+@dataclass
+class ValueSpec:
+    """Giá trị + kích thước chân bắt buộc của một dòng BOM."""
+
+    kind: str           # resistor / capacitor / inductor / crystal / fuse
+    value: float        # đơn vị gốc: ohm / F / H / Hz / A
+    size: str           # đã quy đổi (canon_size), vd "0603", "1206", "hc49"
+    size_label: str     # như ghi trong BOM, vd "3216"
+    attrs: dict[str, str] = field(default_factory=dict)
+
+
+def _strip_note(text: str) -> str:
+    return re.sub(r"\s*\([^)]*\)\s*$", "", text or "").strip()
+
+
+def _sizes_in(text: str) -> tuple[list[str], list[str], bool]:
+    """(kích thước đã quy đổi, kích thước như viết, có chữ 'cắm lỗ')."""
+    t = _fold(text)
+    canon: list[str] = []
+    labels: list[str] = []
+
+    def add(label: str, c: str = "") -> None:
+        c = c or canon_size(label)
+        if c not in canon:
+            canon.append(c)
+            labels.append(label)
+
+    for m in _SIZE_RE.finditer(t):
+        if m.group(1) in _KNOWN_SIZES:
+            add(m.group(1))
+    for m in _HC49_RE.finditer(t):
+        add("HC49 SMD", "hc49smd") if m.group(1) else add("HC49", "hc49")
+    if "tantal" in t:
+        for m in _CASE_RE.finditer(t):
+            add(_TANTAL_CASE[m.group(1)])
+    tht = bool(_THT_WORDS.search(t) or _THT_ACCENT.search((text or "").lower()))
+    return canon, labels, tht
+
+
+def _detect_kind(text: str) -> str:
+    t = _fold(text)
+    if re.search(r"\b(?:cau chi|fuse|polyfuse|polyswitch)\b", t):
+        return "fuse"
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    for phrase, kind in KIND_PHRASES:
+        if re.search(rf"\b{re.escape(phrase)}\b", t):
+            return kind
+    return ""
+
+
+def _plausible(kind: str, mag: float) -> bool:
+    """Giá trị không ghi đơn vị ('100n', '10k', '8m') có hợp với loại không."""
+    if kind == "capacitor":
+        return mag < 0.01
+    if kind == "inductor":
+        return mag < 1
+    if kind == "resistor":
+        return mag >= 0.01
+    if kind == "crystal":
+        return mag >= 1000
+    return False
+
+
+def _eia(code: str) -> float:
+    return int(code[:-1]) * 10 ** int(code[-1])
+
+
+def _values_in(text: str, kind: str) -> list[tuple[float, bool]]:
+    """Mọi giá trị chính có trong `text`, hiểu theo loại `kind`.
+
+    Trả về [(giá trị, có_chữ)]. `có_chữ` = False với số trần ("104", "10000")
+    — hiểu theo mã EIA hoặc số thẳng, kém chắc chắn hơn.
+    """
+    main = _VALUE_UNIT.get(kind, "")
+    toks: list[str] = []
+    for t in tokenize(text):
+        if "/" in t and parse_value(t) is None:
+            toks.extend(p for p in t.split("/") if p)
+        else:
+            toks.append(t)
+    out: list[tuple[float, bool]] = []
+    for i, t in enumerate(toks):
+        if t in _KNOWN_SIZES:
+            continue
+        pv = parse_value(t)
+        if pv is None:
+            continue
+        mag, unit = pv
+        if unit:
+            if unit == main:
+                out.append((mag, True))
+            continue
+        if any(c.isalpha() for c in t):
+            if _plausible(kind, mag):
+                out.append((mag, True))
+            continue
+        if not t.isdigit() or len(t) < 2 or t.startswith("0"):
+            continue
+        prev = toks[i - 1] if i else ""
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        if prev in _PACK_BEFORE or nxt in _COUNT_AFTER:
+            continue                    # "gói 100 con": số lượng, không phải giá trị
+        if kind == "capacitor" and len(t) == 3:
+            out.append((_eia(t) * 1e-12, False))
+        elif kind == "inductor" and len(t) == 3:
+            out.append((_eia(t) * 1e-6, False))
+        elif kind == "resistor":
+            out.append((float(t), False))
+            if len(t) in (3, 4):
+                out.append((float(_eia(t)), False))
+        elif kind == "crystal" and len(t) >= 4:
+            out.append((float(t), False))
+    return out
+
+
+def _line_value(text: str, kind: str) -> float | None:
+    if kind == "fuse":
+        vals = [v for v, lettered in _values_in(text, kind) if lettered]
+        return vals[0] if vals else None
+    p = parse(text)
+    if p.kind == kind and p.value is not None:
+        return p.value
+    vals = [v for v, lettered in _values_in(text, kind) if lettered]
+    return vals[0] if vals else None
+
+
+def line_spec(line: BomLine) -> ValueSpec | None:
+    """Giá trị + kích thước chân của dòng BOM, nếu đủ cả hai; không thì None."""
+    text = _strip_note(line.raw or line.key)
+    if not text:
+        return None
+    p = parse(text)
+    if p.kind == "mpn" and not _HC49_RE.fullmatch(p.mpn):
+        return None                     # có mã linh kiện: tìm theo mã
+    kind = _detect_kind(text)
+    if kind not in VALUE_KINDS:
+        return None
+    value = _line_value(text, kind)
+    if value is None:
+        return None
+    canon, labels, _ = _sizes_in(text)
+    if not canon:
+        return None
+    attrs = {u: v for u, v in p.attrs.items() if u != _VALUE_UNIT[kind]}
+    return ValueSpec(kind, value, canon[0], labels[0].upper(), attrs)
+
+
+def _fmt_num(x: float) -> str:
+    return f"{round(x, 6):g}"
+
+
+def _eu(num: str, letter: str) -> str:
+    """'4.7', 'K' -> '4K7'. Số nguyên thì không có dạng châu Âu."""
+    if "." not in num:
+        return ""
+    a, b = num.split(".", 1)
+    return f"{a}{letter}{b}"
+
+
+def _eia_code(value: float, base: float) -> str:
+    """Mã EIA 3 số: 100nF (base pF) -> '104'. Không biểu diễn được thì ''."""
+    x = value / base
+    for exp in range(0, 10):
+        m = x / 10 ** exp
+        if 10 - 1e-6 <= m < 100 - 1e-6 and abs(m - round(m)) < 1e-6:
+            return f"{int(round(m))}{exp}"
+    return ""
+
+
+def value_forms(kind: str, value: float) -> list[str]:
+    """Các cách viết của CÙNG một giá trị, theo thứ tự nên thử khi tìm.
+
+    100nF -> 100nF, 0.1uF, 104, 100n ; 10k -> 10k, 10000, 103 ;
+    4.7k -> 4.7k, 4K7, 4700, 472 ; 22pF -> 22pF, 22p, 220.
+    """
+    out: list[str] = []
+    if kind == "capacitor":
+        if value >= 1e-6 * (1 - 1e-9):
+            pre, scale = "u", 1e-6
+        elif value >= 1e-9 * (1 - 1e-9):
+            pre, scale = "n", 1e-9
+        else:
+            pre, scale = "p", 1e-12
+        n = _fmt_num(value / scale)
+        out.append(f"{n}{pre}F")
+        if pre == "n" and value >= 1e-8 * (1 - 1e-9):
+            out.append(f"{_fmt_num(value / 1e-6)}uF")
+        elif pre == "n":
+            out.append(f"{_fmt_num(value / 1e-12)}pF")
+        out.append(_eia_code(value, 1e-12))
+        out.append(f"{n}{pre}")
+        out.append(_eu(n, pre))
+    elif kind == "resistor":
+        if value >= 1e6 * (1 - 1e-9):
+            n, pre = _fmt_num(value / 1e6), "M"
+        elif value >= 1e3 * (1 - 1e-9):
+            n, pre = _fmt_num(value / 1e3), "k"
+        else:
+            n, pre = _fmt_num(value), "R"
+        out.append(f"{n}{pre}")
+        out.append(_eu(n, pre.upper()))
+        if pre == "R":
+            out.append(n)
+        elif abs(value - round(value)) < 1e-6:
+            out.append(str(int(round(value))))
+        if value >= 10:
+            out.append(_eia_code(value, 1.0))
+    elif kind == "inductor":
+        if value >= 1e-3 * (1 - 1e-9):
+            n, pre = _fmt_num(value / 1e-3), "m"
+        elif value >= 1e-6 * (1 - 1e-9):
+            n, pre = _fmt_num(value / 1e-6), "u"
+        else:
+            n, pre = _fmt_num(value / 1e-9), "n"
+        out.append(f"{n}{pre}H")
+        out.append(f"{n}{pre}")
+        uh = value / 1e-6
+        if 1 <= uh < 10 and "." in _fmt_num(uh):
+            out.append(_fmt_num(uh).replace(".", "R"))
+        else:
+            out.append(_eia_code(value, 1e-6))
+    elif kind == "crystal":
+        if value >= 1e6 * (1 - 1e-9):
+            n = _fmt_num(value / 1e6)
+            out += [f"{n}MHz", f"{n}M", f"{value / 1e6:.3f}MHz"]
+        elif value >= 1e3 * (1 - 1e-9):
+            n = _fmt_num(value / 1e3)
+            out += [f"{n}kHz", f"{n}K"]
+            if abs(value - round(value)) < 1e-6:
+                out.append(str(int(round(value))))
+        else:
+            out.append(f"{_fmt_num(value)}Hz")
+    elif kind == "fuse":
+        if value < 1:
+            out += [f"{_fmt_num(value * 1e3)}mA", f"{_fmt_num(value)}A"]
+        else:
+            out.append(f"{_fmt_num(value)}A")
+    seen: set[str] = set()
+    return [f for f in out if f and not (f.lower() in seen or seen.add(f.lower()))]
+
+
+def _same_value(a: float, b: float) -> bool:
+    return math.isclose(a, b, rel_tol=1e-4, abs_tol=1e-15)
+
+
+def score_spec(spec: ValueSpec, title: str) -> tuple[float, str]:
+    """Chấm điểm `title` cho dòng BOM có giá trị + kích thước bắt buộc."""
+    if not title.strip():
+        return 0.0, "rỗng"
+    def show(v: float) -> str:
+        return (value_forms(spec.kind, v) or [format_eng(v)])[0]
+
+    want_v = show(spec.value)
+    reasons: list[str] = []
+
+    # -- loại: tên loại khác hẳn (tụ vs điện trở) làm đổi nghĩa con số -> loại
+    tkind = _detect_kind(title)
+    if tkind in VALUE_KINDS and tkind != spec.kind:
+        return 0.0, f"khác loại ({tkind})"
+
+    # -- giá trị (bắt buộc)
+    vals = _values_in(title, spec.kind)
+    if not vals:
+        return CONSIDER_SCORE, f"không thấy giá trị {want_v}"
+    if not any(_same_value(v, spec.value) for v, _ in vals):
+        shown = ", ".join(sorted({show(v) for v, _ in vals}))
+        return 0.0, f"sai giá trị ({shown} ≠ {want_v})"
+    reasons.append("đúng giá trị")
+    score = 1.0 if tkind == spec.kind else 0.95
+    lettered = {round(math.log10(v), 4) if v > 0 else 0.0
+                for v, lettered in vals if lettered}
+    if len(lettered) > 1:
+        score = min(score, 0.6)
+        reasons.append("tên có nhiều giá trị (bộ kit?)")
+
+    # -- kích thước chân (bắt buộc)
+    canon, labels, tht = _sizes_in(title)
+    raw_hit = bool(re.search(rf"(?<!\d){re.escape(spec.size_label.lower())}(?!\d)",
+                             _fold(title)))
+    if spec.size in canon or raw_hit:
+        reasons.append(f"đúng chân {spec.size_label}")
+        if len(canon) > 1:
+            score = min(score, 0.6)
+            reasons.append("tên có nhiều kích thước")
+    elif canon:
+        return 0.0, f"sai kích thước chân ({'/'.join(labels)} ≠ {spec.size_label})"
+    elif tht and not spec.size.startswith("hc49"):
+        return 0.0, f"sai kích thước chân (cắm lỗ ≠ {spec.size_label})"
+    elif spec.size == "hc49smd" and tht:
+        return 0.0, "sai kích thước chân (cắm lỗ ≠ HC49 SMD)"
+    else:
+        score = min(score, 0.6)
+        reasons.append(f"không thấy kích thước chân {spec.size_label}")
+
+    # -- thuộc tính phụ ghi trong BOM (điện áp, công suất...)
+    if spec.attrs:
+        pt = parse(title)
+        for unit, want in spec.attrs.items():
+            got = pt.attrs.get(unit)
+            if got is not None and got != want:
+                score -= 0.25
+                reasons.append(f"lệch {unit}: {got} ≠ {want}")
+
+    # -- loại xung đột rõ: trừ điểm
+    m = _CONFLICT_WORDS.search(re.sub(r"[^a-z0-9]+", " ", _fold(title)))
+    if m and not (spec.kind == "fuse" and m.group(1) in ("ptc",)):
+        score -= _CONFLICT_PENALTY
+        reasons.append(f"loại xung đột ({m.group(1)})")
+    return max(0.0, min(1.0, score)), "; ".join(reasons)
+
+
+_VENDOR_PREFIX = re.compile(r"^([a-z]{3,})-([a-z]+\d[a-z0-9]*)$")
+
+
+def strip_vendor(mpn: str) -> str:
+    """'HUIKE-HK4100F' -> 'HK4100F'. Không có tiền tố hãng thì trả ''."""
+    m = _VENDOR_PREFIX.match(mpn.lower())
+    if not m or not MPN_RE.match(m.group(2)):
+        return ""
+    return mpn[len(m.group(1)) + 1:]
+
+
 def _line_queries(line: BomLine) -> list[str]:
-    raw = re.sub(r"\s*\([^)]*\)\s*$", "", line.raw or "").strip()
+    raw = _strip_note(line.raw or "")
     out = [q for q in (raw, line.raw, line.key, *line.alt_keys) if q]
+    p = parse(raw or line.key)
+    if p.kind == "mpn" and strip_vendor(p.mpn):
+        out.append(strip_vendor(p.mpn))
     return list(dict.fromkeys(out))
 
 
 def score_candidate(line: BomLine, cand: Candidate) -> Candidate:
-    """Chấm điểm ứng viên theo mọi tên chấp nhận được của dòng BOM (lấy cao nhất)."""
+    """Chấm điểm ứng viên theo mọi tên chấp nhận được của dòng BOM (lấy cao nhất).
+
+    Dòng có giá trị + kích thước chân: chấm bằng `score_spec` (bắt buộc đúng
+    cả hai), các tên thay thế chỉ dùng thêm nếu là mã linh kiện.
+    """
+    spec = line_spec(line)
+    if spec is not None:
+        s, r = score_spec(spec, cand.title)
+        for alt in line.alt_keys:
+            if parse(alt).kind == "mpn":
+                s2, r2 = score_title(alt, cand.title)
+                if s2 > s:
+                    s, r = s2, r2
+        cand.score, cand.reason = round(s, 4), r
+        return cand
     best, why = 0.0, ""
     for q in _line_queries(line):
         s, r = score_title(q, cand.title)
@@ -589,10 +975,31 @@ def search_queries(line: BomLine) -> list[str]:
 
     Ô tìm kiếm của shop VN thường khớp chữ khá ngây thơ, gõ nguyên câu dài
     ("Điện trở 10K 1/4W 5%") hay ra rỗng. Nên thử dạng gọn trước.
+
+    Dòng có giá trị + kích thước chân: KHÔNG kèm tên loại, chỉ
+    '<giá trị> <kích thước>' ("100nF 0603"), lần lượt từng cách viết của
+    giá trị (100nF, 0.1uF, 104, 100n).
     """
+    spec = line_spec(line)
+    if spec is not None:
+        forms = value_forms(spec.kind, spec.value)
+        out = [f"{v} {spec.size_label}" for v in forms]
+        label_c = spec.size_label.lower()
+        if spec.kind == "capacitor" and canon_size(label_c) != label_c:
+            # tụ tantal 3216 -> thử thêm 1206
+            out.append(f"{forms[0]} {canon_size(label_c).upper()}")
+        for alt in line.alt_keys:
+            pa = parse(alt)
+            out.append(pa.mpn.upper() if pa.kind == "mpn" else alt)
+        seen: set[str] = set()
+        return [q for q in out if not (q.lower() in seen or seen.add(q.lower()))]
+
     p = parse(line.raw or line.key)
     out: list[str] = []
     if p.kind == "mpn":
+        short = strip_vendor(p.mpn)
+        if short:
+            out.append(short.upper())
         out.append(p.mpn.upper())
     elif p.kind in _KIND_VN and p.value is not None:
         val = format_eng(p.value).replace("meg", "M")

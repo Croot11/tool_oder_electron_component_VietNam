@@ -252,6 +252,19 @@ def run_cart(page, lines: list, base_url: str, *, dry_run: bool = False,
     return out
 
 
+def format_queries(lines: list) -> str:
+    """Liệt kê từ khoá sẽ gõ vào ô tìm kiếm cho từng dòng BOM (theo thứ tự thử)."""
+    from .browser.matcher import search_queries
+
+    out = ["Từ khoá tìm kiếm (thử lần lượt, dừng ở từ khoá đầu tiên khớp):"]
+    for line in lines:
+        name = line.raw or line.key
+        refs = f"  [{line.designator}]" if line.designator else ""
+        out.append(f"  {name}{refs}")
+        out.append("      " + " | ".join(search_queries(line)))
+    return "\n".join(out)
+
+
 def cmd_cart(args: argparse.Namespace) -> int:
     """Mở shop bằng phiên đã đăng nhập, bỏ BOM vào giỏ. KHÔNG thanh toán."""
     from .browser import BrowserSession, BrowserUnavailable, LoginTimeout
@@ -259,6 +272,11 @@ def cmd_cart(args: argparse.Namespace) -> int:
     lines = bom_mod.load(args.bom)
     if not lines:
         raise SystemExit(f"BOM rỗng hoặc không đọc được: {args.bom}")
+    if args.show_queries or args.dry_run:
+        print(format_queries(lines))
+        print()
+    if args.show_queries and not args.dry_run:
+        return 0
     base = _shop_base(args.shop)
     platform = args.platform or _guess_platform(base, args.shops)
     if args.delay_min < 0 or args.delay_max < args.delay_min:
@@ -408,6 +426,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-s", "--shops", help="file cấu hình shop (JSON)")
     sp.add_argument("--dry-run", action="store_true",
                     help="chỉ tìm và khớp, không bấm thêm vào giỏ")
+    sp.add_argument("--show-queries", action="store_true",
+                    help="chỉ in từ khoá tìm kiếm cho từng dòng BOM rồi thoát "
+                         "(không mở trình duyệt; --dry-run cũng tự in)")
     sp.add_argument("--md", help="lưu báo cáo ra file Markdown")
     sp.add_argument("--profile", help="thư mục profile trình duyệt "
                                       "(mặc định data/browser_profile)")
