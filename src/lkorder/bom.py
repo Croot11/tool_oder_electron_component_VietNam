@@ -19,6 +19,7 @@ import io
 import re
 from pathlib import Path
 
+from . import bom_ibom
 from .models import BomLine
 from .normalize import normalize
 
@@ -131,13 +132,19 @@ def parse_csv(text: str) -> list[BomLine]:
 
 
 def parse_any(text: str) -> list[BomLine]:
-    """Đọc BOM từ chuỗi, tự nhận biết CSV có header hay danh sách tự do."""
+    """Đọc BOM từ chuỗi, tự nhận biết ibom.html, CSV có header hay danh sách tự do."""
+    if bom_ibom.looks_like_ibom(text):
+        # ibom đã gộp sẵn theo Value + Footprint; gộp tiếp theo khoá sẽ trộn
+        # tụ 0603 với tụ 0805 cùng giá trị.
+        return bom_ibom.parse_ibom(text)
     lines = parse_csv(text) if _looks_like_csv(text) else parse_text(text)
     return merge_duplicates(lines)
 
 
 def load(path: str | Path) -> list[BomLine]:
-    """Đọc BOM từ file."""
+    """Đọc BOM từ file (txt, csv, hoặc ibom.html của KiCad)."""
+    if Path(path).suffix.lower() in (".html", ".htm"):
+        return bom_ibom.load(path)
     return parse_any(Path(path).read_text(encoding="utf-8-sig"))
 
 

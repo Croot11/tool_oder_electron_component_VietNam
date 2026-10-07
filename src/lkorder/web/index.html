@@ -55,6 +55,8 @@
   button.mini:hover{border-color:var(--accent);color:var(--accent)}
   .row{display:flex;gap:10px} .row>*{flex:1}
   .hint{font-size:12.5px;color:var(--muted);margin-top:7px}
+  .filepick{display:flex;align-items:center;gap:9px;margin-top:9px;flex-wrap:wrap}
+  .filepick .hint{margin-top:0}
 
   .slider{display:flex;align-items:center;gap:11px}
   .slider input[type=range]{flex:1;accent-color:var(--accent)}
@@ -133,6 +135,12 @@
         <textarea id="bom" spellcheck="false" placeholder="STM32F103C8T6 x2&#10;NE555 x5&#10;Điện trở 10K 1/4W x100&#10;Tụ gốm 100nF x50"></textarea>
         <div class="hint">Mỗi dòng một món. Số lượng ghi <code>x10</code>,
           <code>10 x</code> hay dấu phẩy đều được. Dán thẳng từ Excel cũng chạy.</div>
+        <div class="filepick">
+          <input type="file" id="bomfile" accept=".html,.htm,.txt,.csv,.tsv" hidden>
+          <button class="mini" id="bompick" type="button">Chọn file…</button>
+          <span class="hint" id="bomfileinfo">txt, csv, hoặc <code>ibom.html</code> của KiCad</span>
+          <button class="mini" id="bomclear" type="button" hidden>Bỏ file</button>
+        </div>
 
         <label>Ngại đặt nhiều đơn tới mức nào</label>
         <div class="slider">
@@ -221,6 +229,38 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 });
 
 /* ---------- đặt hàng ---------- */
+// ibom.html của KiCad rất nặng (nhúng cả mạch), không đổ vào ô nhập mà giữ
+// nguyên văn để server tự giải nén và đọc BOM.
+let ibomHtml = null;
+const bomText = () => ibomHtml ?? $('#bom').value;
+function setIbom(name, html){
+  ibomHtml = html;
+  const ta = $('#bom');
+  ta.readOnly = html !== null;
+  ta.value = html === null ? '' :
+    `Đang dùng BOM từ file ${name}\n(bấm "Bỏ file" để nhập tay)`;
+  $('#bomclear').hidden = html === null;
+  $('#bomfileinfo').textContent = html === null
+    ? 'txt, csv, hoặc ibom.html của KiCad' : name;
+}
+$('#bompick').onclick = () => $('#bomfile').click();
+$('#bomclear').onclick = () => setIbom(null, null);
+$('#bomfile').onchange = async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const text = await f.text();
+  if (/\.html?$/i.test(f.name) || /var\s+pcbdata\s*=/.test(text)) {
+    if (!/var\s+pcbdata\s*=/.test(text)) {
+      alert('File này không phải ibom.html (không thấy "var pcbdata").');
+      return;
+    }
+    setIbom(f.name, text);
+  } else {
+    setIbom(null, null);
+    $('#bom').value = text;
+  }
+};
 const pen = $('#pen');
 pen.oninput = () => $('#penv').textContent = vnd(+pen.value);
 
@@ -230,7 +270,7 @@ $('#run').onclick = async () => {
   btn.innerHTML = '<span class="spin"></span>Đang tính…';
   try {
     const r = await api('/api/solve', {
-      bom: $('#bom').value,
+      bom: bomText(),
       penalty: +pen.value,
       max_shops: $('#maxshops').value || null,
     });
@@ -323,7 +363,7 @@ function renderSolve(r){
 
 /* ---------- khớp ---------- */
 $('#runmatch').onclick = async () => {
-  const r = await api('/api/match', {bom: $('#bom').value});
+  const r = await api('/api/match', {bom: bomText()});
   const out = $('#mout');
   if (!r.rows || !r.rows.length){
     out.innerHTML = '<div class="card empty">Chưa có gì để kiểm tra — '
