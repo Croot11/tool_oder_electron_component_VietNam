@@ -111,6 +111,10 @@
     vertical-align:-2px;margin-right:7px}
   @keyframes sp{to{transform:rotate(1turn)}}
   code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:12.5px}
+  footer.ver{max-width:1180px;margin:-40px auto 0;padding:0 22px 22px;
+    font-size:12px;color:var(--muted);text-align:right}
+  #stale{max-width:1180px;margin:14px auto 0}
+  #stale:empty{display:none}
 
   /* ---------- màn hình chính: BOM + link shop + Bắt đầu ---------- */
   nav .sep{width:1px;background:var(--line);margin:4px 6px}
@@ -156,6 +160,7 @@
     <button data-tab="catalog" class="minor">Bảng giá</button>
   </nav>
 </header>
+<div id="stale" class="note warn" role="alert"></div>
 
 <main>
 
@@ -267,6 +272,7 @@
 </section>
 
 </main>
+<footer class="ver" id="ver">Đang đọc phiên bản server…</footer>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -640,6 +646,35 @@ $('#savecat').onclick = async () => {
   if (!r.error) loadShops();
   setTimeout(() => $('#catmsg').textContent = '', 2600);
 };
+
+/* ---------- phiên bản server ---------- */
+const fmtTime = t => new Date(t*1000).toLocaleString('vi-VN');
+async function checkVersion(){
+  let v;
+  try {
+    const r = await fetch('/api/version', {cache:'no-store'});
+    v = await r.json();
+    if (!r.ok || v.error) throw new Error('old');
+  } catch (e) {
+    // server cũ (chưa có /api/version) hoặc server đã tắt
+    $('#ver').textContent = 'Không đọc được phiên bản server.';
+    $('#stale').innerHTML = '<b>Server đang chạy là bản cũ hoặc đã tắt.</b> ' +
+      'Đóng mọi cửa sổ <code>python -m lkorder web</code> rồi mở lại.';
+    return;
+  }
+  $('#ver').textContent = `Server PID ${v.pid} · commit ${v.commit || 'không rõ'}` +
+    ` · khởi động ${fmtTime(v.started)}`;
+  $('#stale').innerHTML = v.source_changed
+    ? '<b>Code đã đổi sau khi server khởi động, hãy mở lại.</b> ' +
+      `File nguồn sửa lúc ${esc(fmtTime(v.source_mtime))}` +
+      (v.commit_now && v.commit_now !== v.commit
+        ? ` (commit ${esc(v.commit)} → ${esc(v.commit_now)})` : '') +
+      '. Tắt server (Ctrl+C) rồi chạy lại <code>python -m lkorder web</code>.'
+    : '';
+}
+checkVersion();
+setInterval(checkVersion, 30000);
+window.addEventListener('focus', checkVersion);
 
 loadShops();
 </script>

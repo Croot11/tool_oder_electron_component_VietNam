@@ -345,14 +345,18 @@ def cmd_shops(args: argparse.Namespace) -> int:
 
 
 def cmd_web(args: argparse.Namespace) -> int:
-    from .web import serve
+    from .web import PortBusy, serve
 
-    serve(
-        port=args.port,
-        open_browser=not args.no_open,
-        shops_path=Path(args.shops) if args.shops else None,
-        catalog_path=Path(args.catalog) if args.catalog else None,
-    )
+    try:
+        serve(
+            port=args.port,
+            open_browser=not args.no_open,
+            shops_path=Path(args.shops) if args.shops else None,
+            catalog_path=Path(args.catalog) if args.catalog else None,
+        )
+    except PortBusy as e:
+        print(f"Lỗi: {e}", file=sys.stderr)
+        return 2
     return 0
 
 

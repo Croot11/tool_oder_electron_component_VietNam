@@ -11,8 +11,14 @@ nhân, không có đăng nhập, nên đừng mở ra mạng ngoài.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import random
+import re
+import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +36,111 @@ from ..models import BomLine, Shop, Solution
 from ..optimizer import Options, compare_scenarios, solve
 
 HERE = Path(__file__).resolve().parent
+PKG_ROOT = HERE.parent          # src/lkorder — nơi chứa các file .py đang chạy
+
+
+# ------------------------------------------------- phiên bản code đang chạy
+
+
+def git_commit(root: Path | None = None) -> str:
+    """Commit git ngắn của thư mục chứa code. Không có git thì ''."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(root or PKG_ROOT), capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def latest_source_mtime(root: Path | None = None) -> float:
+    """Thời điểm sửa mới nhất trong các file .py dưới `root` (0 nếu không có)."""
+    newest = 0.0
+    for p in Path(root or PKG_ROOT).rglob("*.py"):
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+# ----------------------------------------------------------- cổng bị chiếm
+
+
+class PortBusy(OSError):
+    """Cổng đã có tiến trình khác lắng nghe."""
+
+    def __init__(self, port: int, pid: int | None = None) -> None:
+        self.port, self.pid = port, pid
+        who = f"PID {pid}" if pid else "PID không rõ"
+        super().__init__(
+            f"Cổng {port} đang được tiến trình khác dùng ({who}). "
+            f"Đóng nó hoặc dùng --port")
+
+
+def parse_netstat_pid(text: str, port: int) -> int | None:
+    """Tìm PID đang LISTEN trên `port` trong kết quả `netstat -ano` (Windows)."""
+    for line in text.splitlines():
+        cols = line.split()
+        if len(cols) < 5 or cols[0].upper() != "TCP":
+            continue
+        local, state, pid = cols[1], cols[3].upper(), cols[-1]
+        if state != "LISTENING" or not re.search(rf":{port}$", local):
+            continue
+        if pid.isdigit() and int(pid) > 0:
+            return int(pid)
+    return None
+
+
+def find_pid_on_port(port: int) -> int | None:
+    """PID tiến trình đang giữ cổng. Không tìm được thì None (không bao giờ lỗi)."""
+    try:
+        if sys.platform == "win32":
+            r = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                               capture_output=True, text=True, timeout=5,
+                               errors="replace")
+            return parse_netstat_pid(r.stdout, port)
+        r = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                           capture_output=True, text=True, timeout=5)
+        first = (r.stdout.split() or [""])[0]
+        return int(first) if first.isdigit() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _is_addr_in_use(e: OSError) -> bool:
+    # Windows: 10048 WSAEADDRINUSE; 10013 WSAEACCES khi bên kia giữ độc quyền
+    return (e.errno == errno.EADDRINUSE
+            or getattr(e, "winerror", None) in (10048, 10013))
+
+
+class Server(ThreadingHTTPServer):
+    """HTTP server không cho hai tiến trình cùng giữ một cổng.
+
+    Trên Windows, SO_REUSEADDR (mặc định của HTTPServer) cho phép tiến trình
+    thứ hai bind trùng cổng — trình duyệt có thể rơi vào tiến trình cũ. Ở đây
+    tắt nó và bật SO_EXCLUSIVEADDRUSE để bind lần hai báo lỗi ngay.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        excl = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if sys.platform == "win32" and excl is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, excl, 1)
+        super().server_bind()
+
+
+def make_server(port: int, handler, host: str = "127.0.0.1") -> Server:
+    """Tạo server; cổng bận thì ném PortBusy (kèm PID nếu tìm được)."""
+    try:
+        return Server((host, port), handler)
+    except OSError as e:
+        if _is_addr_in_use(e):
+            raise PortBusy(port, find_pid_on_port(port)) from e
+        raise
 
 
 # --------------------------------------------------------- chuyển sang JSON
@@ -266,11 +377,17 @@ class App:
     """Giữ cấu hình và catalog, nạp lại khi file trên đĩa đổi."""
 
     def __init__(self, shops_path: Path | None, catalog_path: Path | None,
-                 cart_runner: CartRunner | None = None) -> None:
+                 cart_runner: CartRunner | None = None,
+                 source_root: Path | None = None) -> None:
         self.shops_path = Path(shops_path) if shops_path else config.default_shops_path()
         self.catalog_path = (
             Path(catalog_path) if catalog_path else config.default_catalog_path()
         )
+        # Dấu vết phiên bản lúc khởi động, để giao diện biết code đã đổi chưa
+        self.source_root = Path(source_root) if source_root else PKG_ROOT
+        self.started = time.time()
+        self.commit = git_commit(self.source_root)
+        self.source_mtime = latest_source_mtime(self.source_root)
         self._lock = threading.Lock()
         self.cart_runner: CartRunner = cart_runner or browser_cart_runner
         self._jobs: dict[str, CartJob] = {}
@@ -337,6 +454,27 @@ class App:
         if self.catalog_path.exists():
             cat.add_all(load_offers_csv(self.catalog_path))
         return cat
+
+    # --- phiên bản
+
+    def version(self) -> dict:
+        """Commit + thời điểm khởi động, và code trên đĩa có mới hơn không."""
+        now_mtime = latest_source_mtime(self.source_root)
+        now_commit = git_commit(self.source_root)
+        # so với cả lúc khởi động lẫn mtime lúc đó: tránh báo nhầm khi file
+        # được sửa ngay trước khi chạy hoặc đồng hồ file lệch
+        changed = now_mtime > max(self.started, self.source_mtime)
+        if self.commit and now_commit and now_commit != self.commit:
+            changed = True
+        return {
+            "pid": os.getpid(),
+            "commit": self.commit,
+            "commit_now": now_commit,
+            "started": self.started,
+            "source_mtime_at_start": self.source_mtime,
+            "source_mtime": now_mtime,
+            "source_changed": changed,
+        }
 
     # --- các thao tác
 
@@ -511,6 +649,8 @@ def make_handler(app: App):
                 self._json(app.state())
             elif path == "/api/catalog":
                 self._json(app.read_catalog())
+            elif path == "/api/version":
+                self._json(app.version())
             elif path == "/api/job":
                 q = parse_qs(urlsplit(self.path).query)
                 self._json(app.job((q.get("id") or [""])[0]))
@@ -551,10 +691,13 @@ def make_handler(app: App):
 
 def serve(port: int = 8765, open_browser: bool = True,
           shops_path: Path | None = None, catalog_path: Path | None = None) -> None:
+    """Chạy server. Cổng bận thì ném PortBusy ngay (không treo)."""
     app = App(shops_path, catalog_path)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+    httpd = make_server(port, make_handler(app))
     url = f"http://127.0.0.1:{port}"
     print(f"Giao diện đang chạy: {url}")
+    print(f"PID {os.getpid()} · commit {app.commit or 'không rõ'} · "
+          f"khởi động {time.strftime('%H:%M:%S %d/%m/%Y', time.localtime(app.started))}")
     print("Nhấn Ctrl+C để dừng.\n")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
