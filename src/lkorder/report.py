@@ -219,3 +219,159 @@ def to_markdown(sol: Solution) -> str:
             out.append(f"- {ln.raw or ln.key} × {ln.qty}")
         out.append("")
     return "\n".join(out)
+
+
+# ------------------------------------------------------------ báo cáo giỏ hàng
+#
+# Kết quả của `lk cart` là danh sách `browser.cart.LineResult`. Ở đây chỉ đọc
+# thuộc tính (status, line, product, units, pieces, candidates, message) nên
+# không cần import module trình duyệt.
+
+CART_MATCHED = "matched"     # --dry-run: đã khớp, lẽ ra sẽ bỏ giỏ
+
+_CART_GROUPS = ("added", "not_found", "check")
+
+
+def _cart_group(status: str) -> str:
+    if status in ("added", CART_MATCHED):
+        return "added"
+    if status == "not_found":
+        return "not_found"
+    return "check"            # uncertain, error, hoặc trạng thái lạ
+
+
+def _cart_titles(dry_run: bool) -> dict[str, str]:
+    return {
+        "added": "KHỚP — SẼ THÊM VÀO GIỎ (dry-run, chưa bấm)" if dry_run
+                 else "ĐÃ THÊM VÀO GIỎ",
+        "not_found": "KHÔNG THẤY TRÊN SHOP",
+        "check": "CẦN KIỂM TRA BẰNG MẮT",
+    }
+
+
+def group_cart_results(results: Sequence) -> dict[str, list]:
+    groups: dict[str, list] = {g: [] for g in _CART_GROUPS}
+    for r in results:
+        groups[_cart_group(r.status)].append(r)
+    return groups
+
+
+def _need(r) -> str:
+    return f"{r.line.raw or r.line.key} × {r.line.qty}"
+
+
+def _bought(r) -> str:
+    if not r.units:
+        return "-"
+    return f"{r.units}" + (f" ({r.pieces} con)" if r.pieces and r.pieces != r.units
+                           else "")
+
+
+def _status_label(r) -> str:
+    return {"uncertain": "chưa chắc", "error": "lỗi"}.get(r.status, r.status)
+
+
+def cart_counts(results: Sequence) -> dict[str, int]:
+    return {g: len(v) for g, v in group_cart_results(results).items()}
+
+
+def render_cart(results: Sequence, shop_url: str = "",
+                dry_run: bool = False) -> str:
+    """Báo cáo cho terminal: đã thêm / không thấy / cần kiểm tra."""
+    if not results:
+        return "BOM không có dòng nào."
+    groups = group_cart_results(results)
+    titles = _cart_titles(dry_run)
+    parts: list[str] = []
+    if shop_url:
+        parts.append(f"Shop: {shop_url}")
+        parts.append("")
+
+    if groups["added"]:
+        parts.append(f"✓ {titles['added']} ({len(groups['added'])})")
+        rows = [[trunc(_need(r), 32),
+                 trunc(r.product.title if r.product else "-", 40),
+                 _bought(r),
+                 vnd(r.product.price) if r.product and r.product.price else "-"]
+                for r in groups["added"]]
+        parts.append(table(rows, ["Cần", "Sản phẩm", "Số lượng", "Đơn giá"],
+                           ["<", "<", ">", ">"], indent="   "))
+        parts.append("")
+
+    if groups["not_found"]:
+        parts.append(f"✗ {titles['not_found']} ({len(groups['not_found'])})")
+        for r in groups["not_found"]:
+            note = f" — {r.message}" if r.message else ""
+            parts.append(f"   • {_need(r)}{note}")
+        parts.append("")
+
+    if groups["check"]:
+        parts.append(f"? {titles['check']} ({len(groups['check'])})")
+        for r in groups["check"]:
+            note = f" — {r.message}" if r.message else ""
+            parts.append(f"   • [{_status_label(r)}] {_need(r)}{note}")
+            for c in (r.candidates or [])[:3]:
+                price = f", {vnd(c.price)}" if c.price else ""
+                parts.append(f"       ↳ {trunc(c.title, 50)} "
+                             f"(điểm {c.score:.2f}{price})")
+                if c.url:
+                    parts.append(f"         {c.url}")
+        parts.append("")
+
+    n = cart_counts(results)
+    parts.append("═" * 62)
+    verb = "Khớp" if dry_run else "Đã thêm"
+    parts.append(f"{verb} {n['added']}/{len(results)}  ·  "
+                 f"Không thấy {n['not_found']}  ·  Cần kiểm tra {n['check']}")
+    if dry_run:
+        parts.append("(--dry-run: chưa bấm thêm vào giỏ)")
+    else:
+        parts.append("Công cụ KHÔNG thanh toán — hãy mở giỏ hàng, kiểm tra rồi "
+                     "tự đặt.")
+    return "\n".join(parts)
+
+
+def cart_to_markdown(results: Sequence, shop_url: str = "",
+                     dry_run: bool = False) -> str:
+    groups = group_cart_results(results)
+    titles = _cart_titles(dry_run)
+    n = cart_counts(results)
+    out = ["# Giỏ hàng linh kiện" + (" (dry-run)" if dry_run else ""), ""]
+    if shop_url:
+        out.append(f"Shop: {shop_url}")
+        out.append("")
+    verb = "Khớp" if dry_run else "Đã thêm"
+    out.append(f"**{verb} {n['added']}/{len(results)}** · Không thấy "
+               f"{n['not_found']} · Cần kiểm tra {n['check']}")
+    out.append("")
+
+    def esc(s: str) -> str:
+        return (s or "").replace("|", "\\|")
+
+    def link(c) -> str:
+        if c is None:
+            return "-"
+        return f"[{esc(c.title)}]({c.url})" if c.url else esc(c.title)
+
+    if groups["added"]:
+        out += [f"## {titles['added']}", "",
+                "| Cần | Sản phẩm | Số lượng | Đơn giá |", "|---|---|---:|---:|"]
+        for r in groups["added"]:
+            price = vnd(r.product.price) if r.product and r.product.price else "-"
+            out.append(f"| {esc(_need(r))} | {link(r.product)} | {_bought(r)} | "
+                       f"{price} |")
+        out.append("")
+    if groups["not_found"]:
+        out += [f"## {titles['not_found']}", ""]
+        for r in groups["not_found"]:
+            out.append(f"- {_need(r)}" + (f" — {r.message}" if r.message else ""))
+        out.append("")
+    if groups["check"]:
+        out += [f"## {titles['check']}", ""]
+        for r in groups["check"]:
+            out.append(f"- **[{_status_label(r)}]** {_need(r)}"
+                       + (f" — {r.message}" if r.message else ""))
+            for c in (r.candidates or [])[:3]:
+                out.append(f"  - {link(c)} (điểm {c.score:.2f})")
+        out.append("")
+    return "\n".join(out)

@@ -1,130 +1,146 @@
-# lkorder — gom đơn linh kiện
+# lkorder — BOM + link shop → giỏ hàng
 
-Tìm linh kiện ở các shop VN rồi **gom về ít đơn nhất có thể**, thay vì mỗi
-con một shop.
+Đưa vào **file BOM** và **link một shop linh kiện**, tool mở Chrome bằng tài
+khoản của bạn, tìm từng linh kiện trên shop đó và **bỏ vào giỏ hàng**. Bạn chỉ
+việc mở giỏ, xem lại và tự thanh toán.
 
-## Chạy
+> Tool **không bao giờ thanh toán**. Mọi nút có chữ "thanh toán", "mua ngay",
+> "đặt hàng", "checkout"… đều bị chặn, không bấm.
 
-**Có giao diện** — nhấn đúp vào `mo-giao-dien.cmd`, hoặc:
+## Cài đặt
+
+Cần Python 3.10 trở lên. Phần bỏ giỏ cần thêm Playwright:
 
 ```
-python -m lkorder web
+python -m pip install playwright
+python -m playwright install chrome
 ```
 
-Trình duyệt tự mở http://127.0.0.1:8765. Bốn thẻ:
+hoặc cài cả gói: `pip install -e .[browser]` rồi `playwright install chrome`.
 
-| Thẻ | Làm gì |
+Không cài Playwright vẫn dùng được phần gom đơn / bảng giá (chỉ thư viện chuẩn).
+`mo-giao-dien.cmd` tự kiểm tra Playwright và hỏi có muốn cài luôn không.
+
+## Dùng
+
+### Giao diện
+
+Nhấn đúp `mo-giao-dien.cmd` (hoặc `python -m lkorder web`). Trình duyệt mở
+http://127.0.0.1:8765, thẻ **Bỏ vào giỏ**:
+
+1. **Chọn file BOM** — kéo thả `.csv`, `.txt`, `.tsv` (xuất từ Excel, KiCad,
+   Altium đều được).
+2. **Dán link shop** — vd `https://tenshop.vn`.
+3. Bấm **Bắt đầu**. Một cửa sổ Chrome hiện ra và tool chạy từng dòng, có
+   tiến độ và nút **Dừng**.
+
+Kết quả chia ba nhóm:
+
+| Nhóm | Nghĩa |
 |---|---|
-| **Đặt hàng** | dán danh sách cần mua, kéo thanh trượt "ngại đặt nhiều đơn", xem kết quả chia đơn kèm nút copy từng đơn |
-| **Kiểm tra khớp** | xem tool hiểu tên linh kiện của bạn thành gì — xem trước khi đặt tiền thật |
-| **Shop** | sửa phí ship, mức freeship, phí phiền, bật/tắt từng shop |
-| **Bảng giá** | dán/sửa CSV giá ngay trên trình duyệt |
+| **Đã thêm vào giỏ** | khớp chắc chắn, đã bấm thêm và thấy giỏ tăng |
+| **Không thấy trên shop** | tìm không ra món nào đủ giống |
+| **Cần kiểm tra bằng mắt** | có ứng viên nhưng chưa chắc, hoặc không xác nhận được giỏ đã tăng — tool **không** bỏ giỏ, tự xử lý tay |
 
-Giao diện chỉ mở cho máy của bạn (127.0.0.1), không có đăng nhập nên đừng
-mở ra mạng ngoài.
+Giao diện chỉ mở cho máy của bạn (127.0.0.1), không có đăng nhập, đừng mở ra
+mạng ngoài.
 
-### Hoặc dùng dòng lệnh
-
-```
-python -m lkorder order data/bom_mau.txt      # phương án tốt nhất
-python -m lkorder compare data/bom_mau.txt    # ít đơn hơn thì đắt thêm bao nhiêu
-python -m lkorder match data/bom_mau.txt      # soi lại việc khớp tên
-python -m lkorder fetch data/bom_mau.txt      # tra giá tự động từ web shop
-python -m lkorder shops                       # danh sách shop
-```
-
-Vài tuỳ chọn hay dùng:
+### Dòng lệnh
 
 ```
-lk order bom.txt --penalty 50000   # ngại đơn lẻ hơn -> gom mạnh hơn
-lk order bom.txt --max-shops 2     # ép đúng 2 đơn, xem giá thế nào
-lk order bom.txt --md don.md       # xuất ra file để copy đi đặt
+lk cart bom.txt --shop https://tenshop.vn            # bỏ vào giỏ
+lk cart bom.txt --shop https://tenshop.vn --dry-run  # chỉ tìm + khớp, không bấm
+lk cart bom.txt --shop https://tenshop.vn --md kq.md # lưu báo cáo Markdown
 ```
 
-Không cần cài gì thêm — chỉ dùng thư viện chuẩn của Python.
+Chưa cài gói thì dùng `lk.cmd cart …` hoặc `python -m lkorder cart …`.
 
-## Ý tưởng
+Tuỳ chọn khác: `--platform` (haravan, shopify, sapo, woo — mặc định đoán từ
+`data/shops.json`), `--delay-min/--delay-max` (giây nghỉ giữa hai dòng, mặc
+định 2–5), `--login-timeout` (mặc định 300 giây), `--profile`, `--no-wait`.
 
-Đặt 5 shop cho 10 con linh kiện thì tiền ship và công chờ hàng thường vượt xa
-khoản chênh giá tiết kiệm được. Tool quy chuyện đó thành một con số duy nhất:
+**Nên chạy `--dry-run` trước** với shop mới để xem tool khớp có đúng không.
+
+## Đăng nhập một lần
+
+- Lần đầu, Chrome mở trang shop và tool chờ (tối đa 5 phút) cho bạn **tự đăng
+  nhập trong cửa sổ đó**. Tool không hỏi, không đọc, không lưu mật khẩu.
+- Cookie/phiên đăng nhập được lưu ở `data/browser_profile/`, nên các lần sau
+  vào thẳng, không phải đăng nhập lại (trừ khi shop tự đăng xuất).
+- Thư mục này chứa phiên đăng nhập của bạn: **không chia sẻ, không commit**
+  (đã có trong `.gitignore`). Xoá thư mục để đăng xuất hết.
+- Tool nhận biết "đã đăng nhập" bằng cách dò nút "Đăng xuất", "Tài khoản của
+  tôi"… Shop nào giao diện lạ thì có thể nó không nhận ra — đăng nhập xong mà
+  tool vẫn chờ thì cứ để nó hết giờ và báo lại.
+
+## File BOM
+
+Mỗi dòng một món, số lượng ghi `x10`, `10 x` hoặc cách bằng dấu phẩy; dòng bắt
+đầu bằng `#` bị bỏ qua. Xem `data/bom_mau.txt`:
+
+```
+STM32F103C8T6 x2
+Điện trở 10K 1/4W x100
+Tụ gốm 100nF x50
+```
+
+File CSV/TSV thì tool tự nhận cột tên, số lượng, ký hiệu (designator), ghi chú,
+mã thay thế.
+
+Số lượng được quy theo cách shop bán: shop bán điện trở gói 100 con mà BOM cần
+150 thì đặt 2 gói. Tool cũng tôn trọng số lượng tối thiểu của shop.
+
+## Khớp tên linh kiện
+
+Chỗ dễ sai nhất. Tool bỏ dấu tiếng Việt, lọc từ quảng cáo, tách kiểu chân ra
+khỏi mã, quy đổi đơn vị (`0.1uF` = `100nF`, `1/4W` = `0.25W`, `4K7` = `4.7k`),
+rồi chấm điểm từng kết quả tìm kiếm.
+
+Nguyên tắc: **thà báo "chưa chắc" còn hơn bỏ nhầm hàng vào giỏ.** Sai giá trị
+linh kiện thụ động (10K với 100K, 100nF với 10nF) là loại thẳng.
+
+## Giới hạn đã biết
+
+- **Mỗi lượt chỉ một shop.** Muốn chia BOM ra nhiều shop thì dùng phần gom đơn
+  (bên dưới) để quyết định trước, rồi chạy `cart` cho từng shop.
+- **Shop được hỗ trợ tốt nhất:** web chạy Haravan, Sapo, Shopify,
+  WooCommerce. Shop khác tool vẫn thử (ô tìm kiếm, URL `/search?q=`) nhưng có
+  thể không đọc được kết quả. **Chưa hỗ trợ sàn TMĐT** (Shopee, Lazada, Tiki…).
+- **Chưa kiểm chứng trên mọi shop thật.** Giao diện mỗi shop một kiểu; nút
+  "Thêm vào giỏ", ô số lượng, biểu tượng giỏ có thể không được nhận ra. Khi đó
+  dòng đó rơi vào "Cần kiểm tra bằng mắt", không bị bỏ nhầm.
+- **Biến thể sản phẩm** (chọn màu, kiểu chân, giá trị trong một trang) chưa
+  được chọn tự động — tool bấm thêm với lựa chọn mặc định của trang, nên với
+  các món này hãy xem lại trong giỏ.
+- **Captcha, OTP, chống bot**: tool không vượt qua. Gặp thì tự xử lý trong cửa
+  sổ Chrome hoặc chạy lại sau.
+- **Không kiểm tra giỏ có sẵn.** Hàng cũ trong giỏ vẫn nằm đó; chạy hai lần là
+  thêm hai lần. Nên dọn giỏ trước khi chạy.
+- **Cần Chrome** cài trên máy (Playwright dùng Chrome thật, hiện cửa sổ, không
+  chạy ngầm). Chỉ chạy một lượt cùng lúc.
+- Tool nghỉ ngẫu nhiên 2–5 giây giữa hai dòng để không dồn dập lên shop; BOM
+  vài chục dòng mất vài phút. Bạn vẫn nên tự xem điều khoản sử dụng của shop.
+
+## Phần cũ: gom đơn nhiều shop
+
+Trong giao diện là các thẻ **Gom đơn**, **Kiểm tra khớp**, **Shop**, **Bảng
+giá**. Dựa trên bảng giá `data/catalog.csv` và cấu hình `data/shops.json`, tool
+chọn tổ hợp shop sao cho
 
 ```
 tổng = tiền hàng + tiền ship + (số đơn × chi phí phiền)
 ```
 
-`chi phí phiền` là mức bạn sẵn sàng trả để bớt được một đơn. Chỉnh bằng
-`--penalty`; mặc định 20.000đ/đơn.
+nhỏ nhất (Set Cover có trọng số, duyệt hết tổ hợp khi ≤ 16 shop).
 
-Bài toán này là Set Cover có trọng số. Vì số shop nhỏ (dưới 16), tool **duyệt
-hết mọi tổ hợp shop** thay vì đoán mò.
+```
+lk order bom.txt                  # phương án tốt nhất
+lk order bom.txt --penalty 50000  # ngại đơn lẻ hơn -> gom mạnh hơn
+lk compare bom.txt                # ít đơn hơn thì đắt thêm bao nhiêu
+lk match bom.txt                  # soi lại việc khớp tên
+lk fetch bom.txt --dry-run        # thử tra giá tự động (haravan/woo/jsonld)
+lk shops                          # danh sách shop
+```
 
-Chất lượng lời giải, nói cho đúng:
-
-| Tình huống | Kết quả |
-|---|---|
-| Không shop nào có mức freeship, ≤ 16 shop | tối ưu tuyệt đối |
-| Có mức freeship | gần tối ưu — đối chiếu vét cạn trên 1598 bài ngẫu nhiên: 1597 bài trùng khớp, 1 bài đắt hơn 0,97% |
-| Trên 16 shop | heuristic (tham lam + tìm kiếm cục bộ) |
-
-Mức freeship làm các linh kiện phụ thuộc lẫn nhau — dồn thêm hàng vào một shop
-có thể được miễn ship — nên phần này phải dùng tìm kiếm cục bộ.
-
-## Dữ liệu
-
-- `data/shops.json` — phí ship, mức freeship, chi phí phiền của từng shop.
-  **Sửa cho khớp thực tế của bạn.**
-- `data/catalog.csv` — bảng giá. Cột bắt buộc: `shop`, `ten`, `gia`.
-  Cột thêm: `sku`, `ton`, `moq`, `pack`, `bac_gia`, `url`.
-
-  | Cột | Nghĩa |
-  |---|---|
-  | `gia` | giá của **một đơn vị bán** — một gói, nếu shop bán theo gói |
-  | `pack` | số linh kiện trong một đơn vị bán. "Điện trở 10K (100 con)" → `100` |
-  | `moq` | số đơn vị bán tối thiểu |
-  | `bac_gia` | giá theo số lượng, dạng `10:4000` + `100:3500` ngăn bởi dấu `|` |
-
-  Bỏ trống `pack` thì tool tự đoán từ tên sản phẩm ("gói 100", "50 con"…).
-  Nó chỉ đoán khi thấy từ chỉ đơn vị đếm, nên `50V` hay `5mm` không bị hiểu
-  nhầm — nhưng vẫn nên kiểm tra bằng `match`.
-
-> ⚠ **Giá trong `data/catalog.csv` là giá bịa để chạy thử.** Phải thay bằng
-> giá thật trước khi dùng để đặt hàng.
-
-## Lấy dữ liệu thật
-
-Ba cách, từ ít việc tới nhiều việc:
-
-1. **Chép tay** giá của những con hay mua vào `catalog.csv`. Với một BOM vài
-   chục món thì đây vẫn là cách nhanh và chắc nhất.
-2. **Xuất từ giỏ hàng**: bỏ hàng vào giỏ ở từng shop rồi chép giá sang CSV.
-3. **Lấy tự động** bằng `lk fetch`. Sửa `platform` của shop trong
-   `shops.json` từ `"csv"` sang một trong:
-
-   | platform | Dùng khi | Cách lấy |
-   |---|---|---|
-   | `haravan` | shop chạy Haravan / Sapo / Shopify | `/search?q=…&view=json` |
-   | `woo` | shop chạy WooCommerce | Store API `/wp-json/wc/store/v1/products` |
-   | `jsonld` | site khác, nhưng có nhúng Schema.org | đọc `<script type="application/ld+json">` |
-
-   Rồi chạy `lk fetch bom.txt --dry-run` để xem shop nào thực sự trả dữ liệu,
-   trước khi ghi đè `catalog.csv`.
-
-   > ⚠ Ba cách trên là khuôn chung của từng nền tảng, **chưa được kiểm chứng
-   > với website thật của các shop trong danh sách mẫu**. Shop hoàn toàn có
-   > thể tắt endpoint, đổi đường dẫn, hoặc chặn truy cập tự động. Nếu `fetch`
-   > không ra gì thì đó là chuyện bình thường — quay lại cách 1.
-
-   Tool tự tôn trọng `robots.txt`, nghỉ 1,5 giây giữa hai lượt gọi cùng một
-   shop, và lưu cache một ngày để chạy lại không nện thêm lượt nào. Bạn vẫn
-   nên tự xem điều khoản sử dụng của shop trước khi dùng.
-
-## Khớp tên linh kiện
-
-Chỗ dễ sai nhất. `"Vi điều khiển STM32F103C8T6 LQFP-48 chính hãng"` và
-`"IC MCU STM32F103C8T6 (SMD)"` phải được hiểu là cùng một con, nếu không tool
-sẽ tưởng phải đặt hai shop.
-
-Tool xử lý: bỏ dấu tiếng Việt, lọc từ quảng cáo, tách kiểu chân ra khỏi mã, và
-quy đổi đơn vị nên `0.1uF` = `100nF`, `1/4W` = `0.25W`, `4K7` = `4.7k`.
-
-**Luôn chạy `match` trước khi đặt** để xem tool hiểu đúng ý bạn chưa.
+> ⚠ Giá trong `data/catalog.csv` là **giá bịa để chạy thử**. Thay bằng giá
+> thật trước khi dùng để ra quyết định.

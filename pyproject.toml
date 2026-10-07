@@ -9,6 +9,11 @@ description = "Tim linh kien o shop VN va gom ve it don nhat co the"
 requires-python = ">=3.10"
 dependencies = []          # chi dung thu vien chuan
 
+[project.optional-dependencies]
+# Can cho "lk cart" / nut "Bat dau" (mo Chrome, bo hang vao gio).
+# Cai: pip install -e .[browser]  roi  playwright install chrome
+browser = ["playwright>=1.40"]
+
 [project.scripts]
 lk = "lkorder.cli:main"
 
